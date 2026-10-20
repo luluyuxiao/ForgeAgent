@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from forgeagent.catalog import ToolCatalog, install_catalog_tools
-from forgeagent.registry import ToolRegistry
-from forgeagent.tools import build_builtin_tools
+from forgeagent.tools import ToolCatalog, ToolRegistry, build_builtin_tools, install_catalog_tools
 
 
 def test_catalog_hides_searches_and_activates_tools(tmp_path):

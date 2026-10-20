@@ -1,18 +1,12 @@
 {
   "servers": {
-    "local-tools": {
-      "transport": "stdio",
-      "command": "python",
-      "args": ["path/to/server.py"],
-      "protocol": "2025-11-25"
-    },
-    "remote-tools": {
+    "context7": {
       "transport": "http",
-      "url": "https://example.com/mcp",
-      "protocol": "2026-07-28",
-      "headers": {
-        "Authorization": "Bearer ${MCP_API_TOKEN}"
-      }
+      "url": "https://mcp.context7.com/mcp",
+      "protocol": "2025-11-25",
+      "reconnect": true,
+      "circuitFailures": 3,
+      "circuitCooldown": 30
     }
   }
 }

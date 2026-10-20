@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url")
     parser.add_argument("--max-rounds", type=int)
     parser.add_argument("--context-tokens", type=int)
+    parser.add_argument("--context-input-ratio", type=float)
     parser.add_argument("--session-dir")
     parser.add_argument("--session", help="autosave under this session id")
     parser.add_argument("--resume", help="resume a saved session")
@@ -35,6 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sandbox-network", choices=["none", "bridge"])
     parser.add_argument("--mcp-config", help="JSON file describing MCP servers")
     parser.add_argument("--trace", help="append runtime events to this JSONL file")
+    parser.add_argument("--hooks-config", help="JSON file describing pre/post Tool hooks")
+    parser.add_argument("--max-cost-usd", type=float)
+    parser.add_argument("--input-price-per-million", type=float)
+    parser.add_argument("--output-price-per-million", type=float)
     parser.add_argument(
         "--trace-content", action="store_true", help="include prompts/arguments in trace"
     )
@@ -106,6 +111,11 @@ def _settings_with_args(settings: Settings, args) -> Settings:
         base_url=args.base_url or settings.base_url,
         max_rounds=args.max_rounds or settings.max_rounds,
         context_tokens=args.context_tokens or settings.context_tokens,
+        context_input_ratio=(
+            args.context_input_ratio
+            if args.context_input_ratio is not None
+            else settings.context_input_ratio
+        ),
         session_dir=(Path(args.session_dir).expanduser() if args.session_dir else settings.session_dir),
         sandbox=args.sandbox or settings.sandbox,
         sandbox_image=args.sandbox_image or settings.sandbox_image,
@@ -113,6 +123,22 @@ def _settings_with_args(settings: Settings, args) -> Settings:
         mcp_config=(Path(args.mcp_config).expanduser() if args.mcp_config else settings.mcp_config),
         trace_path=(Path(args.trace).expanduser() if args.trace else settings.trace_path),
         llm_summary=False if args.no_summary else settings.llm_summary,
+        hooks_config=(
+            Path(args.hooks_config).expanduser() if args.hooks_config else settings.hooks_config
+        ),
+        max_cost_usd=(
+            args.max_cost_usd if args.max_cost_usd is not None else settings.max_cost_usd
+        ),
+        input_price_per_million=(
+            args.input_price_per_million
+            if args.input_price_per_million is not None
+            else settings.input_price_per_million
+        ),
+        output_price_per_million=(
+            args.output_price_per_million
+            if args.output_price_per_million is not None
+            else settings.output_price_per_million
+        ),
     )
 
 
@@ -152,10 +178,58 @@ def _repl(runtime: AgentRuntime, store: SessionStore, session_id: str | None) ->
             continue
         elif lowered == "/tokens":
             usage = runtime.provider.total_usage
+            budget = (
+                f"${runtime.budget.max_usd:.6f}"
+                if runtime.budget.enabled
+                else "disabled"
+            )
             print(
                 f"prompt={usage.prompt_tokens} completion={usage.completion_tokens} "
-                f"total={usage.total_tokens}"
+                f"total={usage.total_tokens} cost=${runtime.estimated_cost_usd:.6f} "
+                f"budget={budget}"
             )
+            continue
+        elif lowered == "/memory":
+            print(runtime.memory.render() or "[empty task memory]")
+            continue
+        elif lowered.startswith("/goal "):
+            try:
+                value = runtime.memory.set_goal(user_input.split(maxsplit=1)[1])
+            except ValueError as error:
+                print(f"Goal rejected: {error}")
+            else:
+                print(json.dumps(value, ensure_ascii=False))
+            continue
+        elif lowered.startswith("/constraint "):
+            try:
+                value = runtime.memory.add_constraint(user_input.split(maxsplit=1)[1])
+            except ValueError as error:
+                print(f"Constraint rejected: {error}")
+            else:
+                print(json.dumps(value, ensure_ascii=False))
+            continue
+        elif lowered.startswith("/decision "):
+            try:
+                value = runtime.memory.add_decision(
+                    user_input.split(maxsplit=1)[1], reason="user"
+                )
+            except ValueError as error:
+                print(f"Decision rejected: {error}")
+            else:
+                print(json.dumps(value, ensure_ascii=False))
+            continue
+        elif lowered == "/skills":
+            print(runtime.skills.catalog() or "[no skills]")
+            continue
+        elif lowered == "/mcp-refresh":
+            print(runtime.refresh_mcp())
+            continue
+        elif lowered == "/diff":
+            tool = runtime.registry.get("git_diff")
+            print(tool.execute() if tool else "git_diff is unavailable.")
+            continue
+        elif lowered == "/transcript":
+            print(json.dumps(runtime.transcript, ensure_ascii=False, indent=2))
             continue
         elif lowered == "/tools":
             active = set(runtime.catalog.names()) if runtime.catalog else set(runtime.registry.names())
@@ -258,6 +332,8 @@ def _run_json(runtime: AgentRuntime, prompt: str) -> str:
                 "content": result,
                 "prompt_tokens": usage.prompt_tokens,
                 "completion_tokens": usage.completion_tokens,
+                "estimated_cost_usd": runtime.estimated_cost_usd,
+                "max_cost_usd": runtime.budget.max_usd,
             },
             ensure_ascii=False,
         ),
@@ -286,6 +362,14 @@ _HELP = """\
 /plan                 toggle read-only planning
 /approve              approve the plan and execute
 /tokens               show provider token usage
+/memory               show structured task memory
+/goal <text>          set the durable task goal
+/constraint <text>    add a durable user constraint
+/decision <text>      record a durable decision
+/skills               list discovered and active Skills
+/mcp-refresh          reconnect and refresh MCP Tool schemas
+/diff                 show the current Git diff
+/transcript           show uncompacted conversation history
 /tools                list registered Tools
 /catalog <query>      search active and hidden Tools
 /tasks                show background Sub-Agent tasks

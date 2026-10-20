@@ -20,6 +20,8 @@ def test_session_roundtrip_preserves_both_histories(tmp_path):
         usage=Usage(12, 4),
         checkpoints=[{"call_id": "c1", "tool": "write_file", "files": []}],
         active_tools=["now", "read_file"],
+        memory={"goal": "finish the task"},
+        active_skills=["review"],
     )
 
     path = store.save(state)
@@ -32,6 +34,9 @@ def test_session_roundtrip_preserves_both_histories(tmp_path):
     assert restored.usage.total_tokens == 16
     assert restored.checkpoints == state.checkpoints
     assert restored.active_tools == state.active_tools
+    assert restored.memory == state.memory
+    assert restored.active_skills == state.active_skills
+    assert path.name == "sessions.db"
 
 
 def test_session_id_cannot_escape_store(tmp_path):
@@ -49,3 +54,16 @@ def test_unknown_session_and_invalid_document_are_clear_errors(tmp_path):
     (tmp_path / "bad.json").write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
     with pytest.raises(TypeError):
         store.load("bad")
+
+
+def test_legacy_json_session_remains_readable(tmp_path):
+    store = SessionStore(tmp_path)
+    legacy = SessionState(session_id="legacy", model="old", version=2)
+    (tmp_path / "legacy.json").write_text(
+        json.dumps(legacy.to_dict()), encoding="utf-8"
+    )
+
+    restored = store.load("legacy")
+
+    assert restored.model == "old"
+    assert restored.version == 2

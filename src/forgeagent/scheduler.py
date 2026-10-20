@@ -7,8 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from .contracts import EventCallback, ToolCall
-from .registry import ToolRegistry
-from .tools import ResourceClaim
+from .tools import ResourceClaim, ToolRegistry
 
 
 @dataclass(frozen=True)
@@ -55,7 +54,8 @@ class BatchScheduler:
         calls: list[ToolCall],
         *,
         on_event: EventCallback | None = None,
-        before_execute: Callable[[ToolCall], None] | None = None,
+        before_execute: Callable[[ToolCall], str | None] | None = None,
+        after_execute: Callable[[ToolCall, str], None] | None = None,
     ) -> dict[str, str]:
         results: dict[str, str] = {}
         waves = self.plan(calls)
@@ -72,14 +72,18 @@ class BatchScheduler:
             if len(wave) == 1:
                 item = wave[0]
                 results[item.call.id] = self._execute_one(
-                    item.call, on_event, before_execute
+                    item.call, on_event, before_execute, after_execute
                 )
                 continue
             workers = min(self.max_workers, len(wave))
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="forge-tool") as pool:
                 futures = {
                     pool.submit(
-                        self._execute_one, item.call, on_event, before_execute
+                        self._execute_one,
+                        item.call,
+                        on_event,
+                        before_execute,
+                        after_execute,
                     ): item.call
                     for item in wave
                 }
@@ -94,12 +98,14 @@ class BatchScheduler:
         self,
         call: ToolCall,
         on_event: EventCallback | None,
-        before_execute: Callable[[ToolCall], None] | None,
+        before_execute: Callable[[ToolCall], str | None] | None,
+        after_execute: Callable[[ToolCall, str], None] | None,
     ) -> str:
-        if before_execute is not None:
-            before_execute(call)
         _emit(on_event, "tool_started", call_id=call.id, tool=call.name)
-        result = self.registry.execute(call)
+        blocked = before_execute(call) if before_execute is not None else None
+        result = blocked or self.registry.execute(call)
+        if after_execute is not None:
+            after_execute(call, result)
         _emit(
             on_event,
             "tool_completed",

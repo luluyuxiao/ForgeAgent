@@ -1,12 +1,12 @@
 """ForgeAgent public library API."""
 
-from .catalog import ToolCatalog
 from .checkpoints import CheckpointManager
-from .config import ProviderRoute, Settings
+from .config import BudgetExceededError, CostBudget, ProviderRoute, Settings
 from .context import ContextLimitError, ContextWindow
 from .contracts import ChatProvider, ModelReply, ToolCall, Usage
-from .instructions import load_repository_instructions
+from .guidance import SkillRegistry, load_repository_instructions
 from .mcp import McpClient, McpTool
+from .memory import TaskMemory
 from .policies import (
     CapabilityPolicy,
     PermissionPolicy,
@@ -15,23 +15,24 @@ from .policies import (
     RunMode,
 )
 from .providers import FallbackProvider, OpenAICompatibleProvider, PartialResponseError
-from .registry import ToolRegistry
 from .runtime import AgentRuntime
 from .sandbox import DockerExecutor, LocalExecutor
 from .session import SessionState, SessionStore
-from .tools import Tool, ToolEffect, build_builtin_tools
+from .tools import Tool, ToolCatalog, ToolEffect, ToolRegistry, build_builtin_tools
 from .trace import JsonlTrace
 from .workers import SubAgentManager
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "AgentRuntime",
+    "BudgetExceededError",
     "CapabilityPolicy",
     "ChatProvider",
     "CheckpointManager",
     "ContextLimitError",
     "ContextWindow",
+    "CostBudget",
     "DockerExecutor",
     "FallbackProvider",
     "JsonlTrace",
@@ -49,7 +50,9 @@ __all__ = [
     "SessionState",
     "SessionStore",
     "Settings",
+    "SkillRegistry",
     "SubAgentManager",
+    "TaskMemory",
     "Tool",
     "ToolCall",
     "ToolCatalog",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 import time
+from pathlib import Path
 
 from forgeagent.workers import ChildRunResult, SubAgentManager
 
@@ -30,5 +32,32 @@ def test_background_worker_exposes_state():
             assert time.time() < deadline
             time.sleep(0.01)
         assert manager.get(queued.task_id).result == "done:x"
+    finally:
+        manager.close()
+
+
+def test_worktree_isolation_creates_retained_branch(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=repository, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repository, check=True)
+    (repository / "README.md").write_text("demo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=repository, check=True)
+
+    manager = SubAgentManager(
+        lambda task, workspace: str(workspace),
+        workspace=repository,
+        worktree_root=tmp_path / "worktrees",
+    )
+    try:
+        record = manager.submit("review", background=False, isolation="worktree")
+        assert record.status == "completed"
+        assert record.branch.startswith("forgeagent/agent-")
+        assert record.workspace != str(repository)
+        assert (tmp_path / "worktrees") in Path(record.workspace).parents
     finally:
         manager.close()

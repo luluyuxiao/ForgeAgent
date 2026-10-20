@@ -19,13 +19,17 @@ class CommandResult:
 class CommandExecutor(Protocol):
     name: str
 
-    def execute(self, command: str, cwd: Path, timeout: int) -> CommandResult: ...
+    def execute(
+        self, command: str, cwd: Path, timeout: int, *, stdin: str | None = None
+    ) -> CommandResult: ...
 
 
 class LocalExecutor:
     name = "local"
 
-    def execute(self, command: str, cwd: Path, timeout: int) -> CommandResult:
+    def execute(
+        self, command: str, cwd: Path, timeout: int, *, stdin: str | None = None
+    ) -> CommandResult:
         try:
             completed = subprocess.run(
                 command,
@@ -33,6 +37,7 @@ class LocalExecutor:
                 shell=True,
                 text=True,
                 capture_output=True,
+                input=stdin,
                 timeout=timeout,
                 check=False,
             )
@@ -100,12 +105,15 @@ class DockerExecutor:
             shell_command,
         ]
 
-    def execute(self, command: str, cwd: Path, timeout: int) -> CommandResult:
+    def execute(
+        self, command: str, cwd: Path, timeout: int, *, stdin: str | None = None
+    ) -> CommandResult:
         try:
             completed = self._runner(
                 self.command(command, cwd),
                 text=True,
                 capture_output=True,
+                input=stdin,
                 timeout=timeout,
                 check=False,
             )

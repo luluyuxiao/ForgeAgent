@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from forgeagent.checkpoints import CheckpointManager
 from forgeagent.contracts import ToolCall
-from forgeagent.registry import ToolRegistry
-from forgeagent.tools import build_builtin_tools
+from forgeagent.tools import ToolRegistry, build_builtin_tools
 
 
 def test_undo_restores_modified_file(tmp_path):

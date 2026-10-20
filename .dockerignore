@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+.env
+.forgeagent
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+dist
+build
+eval-report.json

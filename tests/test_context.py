@@ -19,6 +19,24 @@ def _assistant_call(call_id: str):
     }
 
 
+def test_input_budget_uses_stricter_hybrid_limit():
+    ratio_limited = ContextWindow(
+        10_000,
+        output_reserve=1_000,
+        safety_margin=500,
+        max_input_ratio=0.8,
+    )
+    reserve_limited = ContextWindow(
+        10_000,
+        output_reserve=3_000,
+        safety_margin=1_000,
+        max_input_ratio=0.8,
+    )
+
+    assert ratio_limited.input_budget == 8_000
+    assert reserve_limited.input_budget == 6_000
+
+
 def test_old_tool_result_is_snipped_without_mutating_source():
     messages = [
         _assistant_call("old"),

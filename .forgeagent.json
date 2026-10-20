@@ -1,0 +1,11 @@
+{
+  "checks": {
+    "lint": [
+      "python -m ruff check src tests examples"
+    ],
+    "test": [
+      "python -m pytest -q",
+      "python -m compileall -q src tests examples"
+    ]
+  }
+}

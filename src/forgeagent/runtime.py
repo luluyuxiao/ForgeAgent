@@ -5,16 +5,20 @@ from __future__ import annotations
 import copy
 import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
-from .catalog import ToolCatalog
 from .checkpoints import CheckpointManager
+from .config import BudgetExceededError, CostBudget
 from .context import ContextWindow
 from .contracts import ChatProvider, EventCallback, Message, TokenCallback, ToolCall, Usage
+from .guidance import SkillRegistry
+from .hooks import ToolHooks
+from .memory import TaskMemory
 from .policies import PolicyContext, PolicyPipeline, RunMode
-from .registry import ToolRegistry
 from .scheduler import BatchScheduler
 from .session import SessionState, SessionStore
+from .tools import ToolCatalog, ToolRegistry
 from .trace import NullTrace, TraceSink
 
 
@@ -34,6 +38,11 @@ class AgentRuntime:
         trace: TraceSink | None = None,
         provider_lock: threading.RLock | None = None,
         repository_instructions: str = "",
+        memory: TaskMemory | None = None,
+        skills: SkillRegistry | None = None,
+        hooks: ToolHooks | None = None,
+        budget: CostBudget | None = None,
+        refresh_mcp: Callable[[], str] | None = None,
     ):
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -49,6 +58,11 @@ class AgentRuntime:
         self.trace = trace or NullTrace()
         self.provider_lock = provider_lock or threading.RLock()
         self.repository_instructions = repository_instructions.strip()
+        self.memory = memory or TaskMemory()
+        self.skills = skills or SkillRegistry()
+        self.hooks = hooks
+        self.budget = budget or CostBudget()
+        self._refresh_mcp = refresh_mcp
         self.mode = RunMode.NORMAL
         self.transcript: list[Message] = []
         self.active_messages: list[Message] = []
@@ -92,8 +106,28 @@ class AgentRuntime:
                     )
 
                 model_before = self.provider.model
+                usage_before = getattr(self.provider, "total_usage", Usage())
+                try:
+                    projected_cost = self.budget.ensure_available(
+                        usage_before,
+                        next_prompt_tokens=prepared.report.after_tokens,
+                        output_reserve=self.context.output_reserve,
+                    )
+                except BudgetExceededError as error:
+                    self._emit(
+                        on_event,
+                        "budget_exceeded",
+                        current_cost_usd=self.budget.cost(usage_before),
+                        limit_usd=self.budget.max_usd,
+                        reason=str(error),
+                    )
+                    raise
                 self._emit(
-                    on_event, "model_started", round=round_number, model=model_before
+                    on_event,
+                    "model_started",
+                    round=round_number,
+                    model=model_before,
+                    projected_cost_usd=projected_cost,
                 )
                 with self.provider_lock:
                     reply = self.provider.complete(
@@ -108,6 +142,7 @@ class AgentRuntime:
                     tool_calls=len(reply.tool_calls),
                     prompt_tokens=reply.usage.prompt_tokens,
                     completion_tokens=reply.usage.completion_tokens,
+                    estimated_cost_usd=self.estimated_cost_usd,
                 )
                 if self.provider.model != model_before:
                     self._emit(
@@ -183,6 +218,7 @@ class AgentRuntime:
                     admitted,
                     on_event=lambda event, fields: self._emit(on_event, event, **fields),
                     before_execute=self._capture_checkpoint,
+                    after_execute=self._after_execute,
                 )
             )
         return observations
@@ -198,6 +234,8 @@ class AgentRuntime:
             self.transcript.clear()
             self.active_messages.clear()
             self.mode = RunMode.NORMAL
+            self.memory.clear()
+            self.skills.restore([])
 
     def snapshot(self, session_id: str) -> SessionState:
         usage = getattr(self.provider, "total_usage", Usage())
@@ -210,6 +248,8 @@ class AgentRuntime:
             usage=usage,
             checkpoints=self.checkpoints.export() if self.checkpoints else [],
             active_tools=list(self.catalog.names()) if self.catalog else [],
+            memory=self.memory.to_dict(),
+            active_skills=list(self.skills.active_names()),
         )
 
     def restore(self, state: SessionState) -> None:
@@ -223,6 +263,8 @@ class AgentRuntime:
                 self.checkpoints.restore(state.checkpoints)
             if self.catalog is not None and state.active_tools:
                 self.catalog.activate(state.active_tools)
+            self.memory.restore(state.memory)
+            self.skills.restore(state.active_skills)
 
     def save(self, store: SessionStore, session_id: str) -> Path:
         return store.save(self.snapshot(session_id))
@@ -256,6 +298,19 @@ class AgentRuntime:
                 f"{self.repository_instructions}\n"
                 "Treat scoped AGENTS.md files as applying only below their directory."
             )
+        task_memory = self.memory.render()
+        if task_memory:
+            task_memory = "\n\n" + task_memory
+        skill_catalog = ""
+        if self.skills:
+            skill_catalog = (
+                "\n\n# Available skills\n"
+                "Use load_skill when a listed workflow matches the task.\n"
+                f"{self.skills.catalog()}"
+            )
+        active_skills = self.skills.render_active()
+        if active_skills:
+            active_skills = "\n\n" + active_skills
         return (
             "You are ForgeAgent, a coding assistant operating in a local workspace.\n"
             f"Workspace: {self.workspace}\n\n"
@@ -268,8 +323,20 @@ class AgentRuntime:
             "5. After modifying code, run the configured checks or relevant tests before finishing.\n"
             "6. Stop when the task is complete."
             + instructions
+            + task_memory
+            + skill_catalog
+            + active_skills
             + planning
         )
+
+    @property
+    def estimated_cost_usd(self) -> float:
+        return self.budget.cost(getattr(self.provider, "total_usage", Usage()))
+
+    def refresh_mcp(self) -> str:
+        if self._refresh_mcp is None:
+            return "MCP is not configured."
+        return self._refresh_mcp()
 
     def undo(self) -> str:
         if self.checkpoints is None:
@@ -278,9 +345,14 @@ class AgentRuntime:
         self.trace.emit("checkpoint_undone", {"result": result})
         return result
 
-    def _capture_checkpoint(self, call: ToolCall) -> None:
+    def _capture_checkpoint(self, call: ToolCall) -> str | None:
+        if self.hooks is not None:
+            blocked = self.hooks.run_pre(call.name, call.arguments)
+            if blocked:
+                self.trace.emit("hook_blocked", {"call_id": call.id, "tool": call.name})
+                return blocked
         if self.checkpoints is None:
-            return
+            return None
         tool = self.registry.require(call.name)
         checkpoint = self.checkpoints.capture(call, tool)
         if checkpoint is not None:
@@ -288,6 +360,16 @@ class AgentRuntime:
                 "checkpoint_created",
                 {"call_id": call.id, "tool": call.name, "files": len(checkpoint.files)},
             )
+        return None
+
+    def _after_execute(self, call: ToolCall, result: str) -> None:
+        if self.hooks is not None:
+            self.hooks.run_post(call.name, call.arguments, result)
+        if result.lstrip().lower().startswith("error") or result.startswith("Blocked by hook"):
+            return
+        tool = self.registry.require(call.name)
+        for path in tool.checkpoint_paths(call.arguments):
+            self.memory.record_file(path)
 
     def _emit(
         self,

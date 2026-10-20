@@ -7,9 +7,8 @@ from typing import Any, ClassVar
 import pytest
 
 from forgeagent.contracts import ToolCall
-from forgeagent.registry import ToolRegistry
 from forgeagent.sandbox import CommandResult
-from forgeagent.tools import Tool, ToolEffect, build_builtin_tools
+from forgeagent.tools import Tool, ToolEffect, ToolRegistry, build_builtin_tools
 
 
 class EchoTool(Tool):

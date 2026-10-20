@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .catalog import ToolCatalog, install_catalog_tools
 from .checkpoints import CheckpointManager
-from .config import Settings
-from .context import ContextWindow
-from .instructions import load_repository_instructions
-from .mcp import McpConnectionSet, load_mcp_tools
+from .config import CostBudget, Settings
+from .context import ContextWindow, ProviderSummarizer
+from .guidance import LoadSkillTool, SkillRegistry, load_repository_instructions
+from .hooks import ToolHooks
+from .mcp import McpConnectionSet, McpTool, load_mcp_tools
+from .memory import MemoryUpdateTool, TaskMemory
 from .policies import CapabilityPolicy, PermissionPolicy, PlanningPolicy, PolicyPipeline
 from .providers import FallbackProvider, OpenAICompatibleProvider
-from .registry import ToolRegistry
 from .runtime import AgentRuntime
 from .sandbox import DockerExecutor, LocalExecutor
-from .summarize import ProviderSummarizer
-from .tools import build_builtin_tools
+from .tools import ToolCatalog, ToolRegistry, build_builtin_tools, install_catalog_tools
 from .trace import JsonlTrace, NullTrace, TraceSink
 from .workers import ChildRunResult, SubAgentManager, SubAgentTool, TaskStatusTool
 
@@ -34,6 +34,7 @@ class RuntimeOptions:
     enable_subagents: bool = True
     enable_mcp: bool = True
     trace_content: bool = False
+    allowed_capabilities: frozenset[str] | None = None
 
 
 @dataclass
@@ -59,11 +60,20 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
         if settings.trace_path
         else NullTrace()
     )
+    memory = TaskMemory()
+    skills = SkillRegistry.discover(workspace)
     registry = ToolRegistry(build_builtin_tools(workspace, executor=executor))
+    registry.register(MemoryUpdateTool(memory))
+    if skills:
+        registry.register(LoadSkillTool(skills))
     core_names = set(registry.names())
+    capability = CapabilityPolicy(options.allowed_capabilities)
     mcp_connections = None
     if options.enable_mcp and settings.mcp_config:
-        mcp_tools, mcp_connections = load_mcp_tools(settings.mcp_config)
+        mcp_tools, mcp_connections = load_mcp_tools(
+            settings.mcp_config,
+            allowed_capabilities=options.allowed_capabilities,
+        )
         for tool in mcp_tools:
             registry.register(tool)
 
@@ -71,18 +81,19 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
         options.ask_permission if options.interactive else None,
         allow_all=options.allow_all,
     )
-    policies = PolicyPipeline([CapabilityPolicy(), PlanningPolicy(), permission])
+    policies = PolicyPipeline([capability, PlanningPolicy(), permission])
 
     workers = None
     if options.enable_subagents:
 
-        def run_child(task: str) -> ChildRunResult:
+        def run_child(task: str, child_workspace: Path) -> ChildRunResult:
             child_options = RuntimeOptions(
-                workspace=workspace,
+                workspace=child_workspace,
                 interactive=False,
                 allow_all=options.allow_all,
                 enable_subagents=False,
                 enable_mcp=options.enable_mcp,
+                allowed_capabilities=options.allowed_capabilities,
             )
             child = create_runtime(settings, child_options)
             try:
@@ -96,19 +107,60 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
             finally:
                 child.close()
 
-        workers = SubAgentManager(run_child)
+        workers = SubAgentManager(run_child, workspace=workspace)
         registry.register(SubAgentTool(workers))
         registry.register(TaskStatusTool(workers))
         core_names.update({"subagent", "task_status"})
 
     catalog = ToolCatalog(registry, active=core_names)
     install_catalog_tools(catalog)
+
+    def refresh_mcp() -> str:
+        if mcp_connections is None:
+            return "MCP is not configured."
+        refreshed, health = mcp_connections.refresh()
+        successful = {
+            str(item.get("name")) for item in health if item.get("status") == "healthy"
+        }
+        previously_active = {
+            name for name in catalog.names() if isinstance(registry.get(name), McpTool)
+        }
+        remove = [
+            name
+            for name in registry.names()
+            if isinstance(registry.get(name), McpTool)
+            and registry.require(name).client.name in successful
+        ]
+        catalog.hide(remove)
+        for name in remove:
+            registry.unregister(name)
+        for tool in refreshed:
+            existing = registry.get(tool.name)
+            if existing is not None and not isinstance(existing, McpTool):
+                health.append(
+                    {
+                        "name": tool.client.name,
+                        "status": "name_conflict",
+                        "error": f"Tool name already exists: {tool.name}",
+                    }
+                )
+                continue
+            registry.replace(tool)
+        catalog.activate(previously_active & set(registry.names()))
+        return json.dumps(
+            {"servers": health, "tool_count": len(refreshed)},
+            ensure_ascii=False,
+            indent=2,
+        )
     summarizer = ProviderSummarizer(provider, provider_lock) if settings.llm_summary else None
     context = ContextWindow(
         settings.context_tokens,
         output_reserve=settings.max_output_tokens,
+        max_input_ratio=settings.context_input_ratio,
         summarizer=summarizer,
     )
+    hooks_path = settings.hooks_config or workspace / ".forgeagent" / "hooks.json"
+    hooks = ToolHooks.load(hooks_path, executor=executor, workspace=workspace)
     runtime = AgentRuntime(
         provider=provider,
         registry=registry,
@@ -121,6 +173,15 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
         trace=trace,
         provider_lock=provider_lock,
         repository_instructions=load_repository_instructions(workspace),
+        memory=memory,
+        skills=skills,
+        hooks=hooks,
+        budget=CostBudget(
+            settings.max_cost_usd,
+            settings.input_price_per_million,
+            settings.output_price_per_million,
+        ),
+        refresh_mcp=refresh_mcp if mcp_connections is not None else None,
     )
     return RuntimeBundle(runtime, mcp_connections, workers)
 

@@ -7,10 +7,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar
 
+_MAX_RESULT_CHARS = 24_000
+
 
 class ToolEffect(str, Enum):
     PURE = "pure"
     READ = "read"
+    STATE = "state"
     WRITE = "write"
     PROCESS = "process"
     NETWORK = "network"
@@ -67,3 +70,11 @@ class Tool(ABC):
     @abstractmethod
     def execute(self, **arguments: Any) -> str:
         raise NotImplementedError
+
+
+def bound_output(value: str) -> str:
+    """Keep local Tool observations from dominating the model context."""
+    if len(value) <= _MAX_RESULT_CHARS:
+        return value
+    omitted = len(value) - _MAX_RESULT_CHARS
+    return value[:_MAX_RESULT_CHARS] + f"\n[truncated {omitted} characters]"

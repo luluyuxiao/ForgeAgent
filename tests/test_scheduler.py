@@ -3,9 +3,8 @@ from __future__ import annotations
 import time
 
 from forgeagent.contracts import ToolCall
-from forgeagent.registry import ToolRegistry
 from forgeagent.scheduler import BatchScheduler
-from forgeagent.tools import Tool, ToolEffect
+from forgeagent.tools import Tool, ToolEffect, ToolRegistry
 
 
 class SlowRead(Tool):
@@ -58,4 +57,3 @@ def test_stateful_tool_is_a_serial_wave_barrier():
     )
 
     assert [[item.call.id for item in wave] for wave in waves] == [["1"], ["2"], ["3"]]
-

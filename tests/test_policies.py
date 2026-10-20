@@ -9,8 +9,7 @@ from forgeagent.policies import (
     PolicyPipeline,
     RunMode,
 )
-from forgeagent.registry import ToolRegistry
-from forgeagent.tools import build_builtin_tools
+from forgeagent.tools import ToolRegistry, build_builtin_tools
 
 
 def _call(name, **arguments):

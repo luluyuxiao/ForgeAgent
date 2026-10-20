@@ -88,7 +88,7 @@ AskCallback = Callable[[str, dict], str]
 
 class PermissionPolicy:
     name = "permission"
-    _NO_EXTERNAL_MUTATION = frozenset({ToolEffect.PURE, ToolEffect.READ})
+    _NO_EXTERNAL_MUTATION = frozenset({ToolEffect.PURE, ToolEffect.READ, ToolEffect.STATE})
 
     def __init__(self, ask: AskCallback | None = None, *, allow_all: bool = False):
         self.ask = ask

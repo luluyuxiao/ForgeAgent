@@ -1,0 +1,14 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "write_*",
+      "command": "python examples/hook_guard.py"
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "apply_patch",
+      "command": "python -m compileall -q src"
+    }
+  ]
+}

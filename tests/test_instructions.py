@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from forgeagent.instructions import load_repository_instructions
+from forgeagent.guidance import load_repository_instructions
 
 
 def test_loads_root_instructions_and_indexes_scoped_files(tmp_path):

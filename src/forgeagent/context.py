@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .contracts import Message
+from .contracts import ChatProvider, Message
 
 
 class ContextLimitError(RuntimeError):
@@ -16,6 +17,38 @@ class ContextLimitError(RuntimeError):
 
 class Summarizer(Protocol):
     def summarize(self, messages: list[Message], target_tokens: int) -> str: ...
+
+
+class ProviderSummarizer:
+    """Use the configured model provider to compact older conversation history."""
+
+    def __init__(self, provider: ChatProvider, lock: threading.RLock | None = None):
+        self.provider = provider
+        self.lock = lock or threading.RLock()
+
+    def summarize(self, messages: list[Message], target_tokens: int) -> str:
+        payload = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+        with self.lock:
+            reply = self.provider.complete(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Summarize earlier coding-agent history. Preserve user requirements, "
+                            "decisions, file paths, edits, tool failures, and unresolved work. "
+                            "Do not invent facts. Return only the compact summary."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Target about {target_tokens} tokens. History:\n{payload}",
+                    },
+                ],
+                [],
+            )
+        if not reply.content.strip():
+            raise RuntimeError("summary provider returned empty content")
+        return reply.content.strip()
 
 
 @dataclass(frozen=True)
@@ -41,22 +74,30 @@ class ContextWindow:
         *,
         output_reserve: int = 8192,
         safety_margin: int = 1024,
+        max_input_ratio: float = 0.85,
         old_tool_result_chars: int = 4000,
         summarizer: Summarizer | None = None,
         summary_target_tokens: int = 1200,
     ):
         if max_tokens <= output_reserve + safety_margin:
             raise ValueError("context window must exceed output reserve and safety margin")
+        if not 0 < max_input_ratio <= 1:
+            raise ValueError("max input ratio must be greater than 0 and at most 1")
+        if int(max_tokens * max_input_ratio) < 1:
+            raise ValueError("max input ratio leaves no input budget")
         self.max_tokens = max_tokens
         self.output_reserve = output_reserve
         self.safety_margin = safety_margin
+        self.max_input_ratio = max_input_ratio
         self.old_tool_result_chars = old_tool_result_chars
         self.summarizer = summarizer
         self.summary_target_tokens = max(128, summary_target_tokens)
 
     @property
     def input_budget(self) -> int:
-        return self.max_tokens - self.output_reserve - self.safety_margin
+        reserved_budget = self.max_tokens - self.output_reserve - self.safety_margin
+        ratio_budget = int(self.max_tokens * self.max_input_ratio)
+        return min(reserved_budget, ratio_budget)
 
     def prepare(
         self,

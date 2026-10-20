@@ -8,14 +8,16 @@ import queue
 import re
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from .tools import Tool, ToolEffect
+from .tools import Access, ResourceClaim, Tool, ToolEffect
 
 MODERN_PROTOCOL = "2026-07-28"
 LEGACY_PROTOCOL = "2025-11-25"
@@ -156,7 +158,18 @@ class HttpTransport:
         self._post({"jsonrpc": "2.0", "method": method, "params": params}, method, params)
 
     def close(self) -> None:
-        return None
+        if not self._session_id:
+            return
+        request = urllib.request.Request(
+            self.url,
+            headers={**self.headers, "Mcp-Session-Id": self._session_id},
+            method="DELETE",
+        )
+        try:
+            urllib.request.urlopen(request, timeout=min(self.timeout, 5)).close()
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+            pass
+        self._session_id = None
 
     def _post(
         self, message: dict[str, Any], method: str, params: dict[str, Any]
@@ -204,26 +217,53 @@ class McpClient:
         transport: McpTransport,
         *,
         protocol: str = LEGACY_PROTOCOL,
+        transport_factory: Callable[[], McpTransport] | None = None,
+        capabilities: frozenset[str] = frozenset({"mcp"}),
+        reconnect: bool = True,
+        circuit_failures: int = 3,
+        circuit_cooldown: float = 30.0,
     ):
+        if circuit_failures < 1 or circuit_cooldown < 0:
+            raise ValueError("MCP circuit settings must be positive")
         self.name = name
         self.transport = transport
         self.protocol = protocol
+        self.transport_factory = transport_factory
+        self.capabilities = capabilities
+        self.reconnect = reconnect
+        self.circuit_failures = circuit_failures
+        self.circuit_cooldown = circuit_cooldown
         self.connected = False
+        self._replace_transport = False
+        self._consecutive_failures = 0
+        self._circuit_opened_at: float | None = None
+        self._reconnect_lock = threading.Lock()
 
     def connect(self) -> None:
         if self.connected:
             return
-        if self.protocol != MODERN_PROTOCOL:
-            self.transport.request(
-                "initialize",
-                {
-                    "protocolVersion": self.protocol,
-                    "capabilities": {},
-                    "clientInfo": {"name": "forgeagent", "version": "0.2.0"},
-                },
-            )
-            self.transport.notify("notifications/initialized", {})
+        self._check_circuit()
+        recovering = self._replace_transport
+        if recovering:
+            self._recreate_transport()
+        try:
+            if self.protocol != MODERN_PROTOCOL:
+                self.transport.request(
+                    "initialize",
+                    {
+                        "protocolVersion": self.protocol,
+                        "capabilities": {},
+                        "clientInfo": {"name": "forgeagent", "version": "0.3.0"},
+                    },
+                )
+                self.transport.notify("notifications/initialized", {})
+        except Exception:
+            self._record_failure()
+            self._replace_transport = True
+            raise
         self.connected = True
+        if not recovering:
+            self._record_success()
 
     def list_tools(self) -> list[dict[str, Any]]:
         self.connect()
@@ -232,7 +272,7 @@ class McpClient:
         seen: set[str] = set()
         while True:
             query = {"cursor": cursor} if cursor else {}
-            result = self.transport.request("tools/list", self._params(query))
+            result = self._request("tools/list", self._params(query))
             tools = result.get("tools") or []
             if not isinstance(tools, list):
                 raise McpError("MCP tools/list did not return a list")
@@ -246,12 +286,22 @@ class McpClient:
             seen.add(cursor)
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        self.connect()
-        return self.transport.request(
+        return self._request(
             "tools/call", self._params({"name": name, "arguments": arguments})
         )
 
+    def health(self) -> dict[str, Any]:
+        opened = self._circuit_opened_at
+        return {
+            "name": self.name,
+            "connected": self.connected,
+            "failures": self._consecutive_failures,
+            "circuit_open": opened is not None
+            and time.monotonic() - opened < self.circuit_cooldown,
+        }
+
     def close(self) -> None:
+        self.connected = False
         self.transport.close()
 
     def _params(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -259,10 +309,55 @@ class McpClient:
             return {**params, "_meta": {"protocolVersion": self.protocol}}
         return params
 
+    def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.connect()
+        self._check_circuit()
+        try:
+            result = self.transport.request(method, params)
+        except Exception:
+            self._record_failure()
+            self.connected = False
+            self._replace_transport = bool(self.transport_factory and self.reconnect)
+            raise
+        self._record_success()
+        return result
+
+    def _recreate_transport(self) -> None:
+        if self.transport_factory is None or not self.reconnect:
+            return
+        with self._reconnect_lock:
+            if not self._replace_transport:
+                return
+            self.transport.close()
+            self.transport = self.transport_factory()
+            self._replace_transport = False
+
+    def _check_circuit(self) -> None:
+        if self._circuit_opened_at is None:
+            return
+        elapsed = time.monotonic() - self._circuit_opened_at
+        if elapsed >= self.circuit_cooldown:
+            self._circuit_opened_at = None
+            self._consecutive_failures = 0
+            return
+        raise McpError(
+            f"MCP server {self.name!r} circuit is open for "
+            f"{self.circuit_cooldown - elapsed:.1f}s"
+        )
+
+    def _record_failure(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self.circuit_failures:
+            self._circuit_opened_at = time.monotonic()
+
+    def _record_success(self) -> None:
+        self._consecutive_failures = 0
+        self._circuit_opened_at = None
+
 
 class McpTool(Tool):
     effect = ToolEffect.UNKNOWN
-    parallel_safe = False
+    parallel_safe = True
 
     def __init__(
         self,
@@ -286,6 +381,9 @@ class McpTool(Tool):
             return "Error from MCP Tool: " + _render_content(result.get("content"))
         return _render_content(result.get("content"), structured=result.get("structuredContent"))
 
+    def resources(self, arguments: dict[str, Any]) -> tuple[ResourceClaim, ...]:
+        return (ResourceClaim(f"mcp-server:{self.client.name}", Access.WRITE),)
+
 
 @dataclass(frozen=True)
 class McpServerConfig:
@@ -298,62 +396,113 @@ class McpServerConfig:
     headers: dict[str, str] = field(default_factory=dict)
     sandbox_image: str | None = None
     network: str = "none"
+    reconnect: bool = True
+    circuit_failures: int = 3
+    circuit_cooldown: float = 30.0
 
 
 class McpConnectionSet:
-    def __init__(self, clients: list[McpClient]):
+    def __init__(self, clients: list[McpClient], errors: list[dict[str, str]] | None = None):
         self.clients = clients
+        self.errors = list(errors or [])
 
     def close(self) -> None:
         for client in self.clients:
             client.close()
 
+    def refresh(self) -> tuple[list[McpTool], list[dict[str, Any]]]:
+        tools: list[McpTool] = []
+        health: list[dict[str, Any]] = list(self.errors)
+        for client in self.clients:
+            try:
+                schemas = client.list_tools()
+            except Exception as error:  # noqa: BLE001 - one MCP server is isolated
+                health.append(
+                    {"name": client.name, "status": "error", "error": str(error)}
+                )
+                continue
+            for schema in schemas:
+                remote_name = str(schema.get("name") or "")
+                if remote_name:
+                    tools.append(
+                        McpTool(
+                            client,
+                            remote_name,
+                            str(schema.get("description") or ""),
+                            dict(schema.get("inputSchema") or {}),
+                            capabilities=client.capabilities,
+                        )
+                    )
+            health.append(
+                {"name": client.name, "status": "healthy", "tools": len(schemas)}
+            )
+        return tools, health
 
-def load_mcp_tools(path: str | Path) -> tuple[list[McpTool], McpConnectionSet]:
+
+def load_mcp_tools(
+    path: str | Path,
+    *,
+    allowed_capabilities: frozenset[str] | None = None,
+) -> tuple[list[McpTool], McpConnectionSet]:
     configs = load_mcp_config(path)
     tools: list[McpTool] = []
     clients: list[McpClient] = []
-    try:
-        for config in configs:
-            if config.transport == "stdio":
-                command = list(config.command)
-                if config.sandbox_image:
-                    command = _docker_stdio_command(config, command)
-                transport: McpTransport = StdioTransport(command, env=config.env)
-                capabilities = {"mcp", "process"}
-                if not config.sandbox_image or config.network != "none":
-                    capabilities.add("network")
-                if not config.sandbox_image:
-                    capabilities.update({"filesystem_read", "filesystem_write"})
-                capabilities = frozenset(capabilities)
-            elif config.transport == "http":
-                transport = HttpTransport(
-                    config.url,
-                    protocol=config.protocol,
-                    headers=config.headers,
-                )
-                capabilities = frozenset({"mcp", "network"})
-            else:
-                raise ValueError(f"unsupported MCP transport: {config.transport}")
-            client = McpClient(config.name, transport, protocol=config.protocol)
-            clients.append(client)
+    errors: list[dict[str, str]] = []
+    known_names: set[str] = set()
+    for config in configs:
+        client: McpClient | None = None
+        try:
+            capabilities = _server_capabilities(config)
+            if allowed_capabilities is not None:
+                missing = sorted(capabilities - allowed_capabilities)
+                if missing:
+                    raise PermissionError(
+                        "capability admission rejected server; missing: " + ", ".join(missing)
+                    )
+
+            def transport_factory(config: McpServerConfig = config) -> McpTransport:
+                return _make_transport(config)
+
+            client = McpClient(
+                config.name,
+                transport_factory(),
+                protocol=config.protocol,
+                transport_factory=transport_factory,
+                capabilities=capabilities,
+                reconnect=config.reconnect,
+                circuit_failures=config.circuit_failures,
+                circuit_cooldown=config.circuit_cooldown,
+            )
+            server_tools: list[McpTool] = []
+            server_names: set[str] = set()
             for schema in client.list_tools():
                 remote_name = str(schema.get("name") or "")
                 if not remote_name:
                     continue
-                tools.append(
-                    McpTool(
-                        client,
-                        remote_name,
-                        str(schema.get("description") or ""),
-                        dict(schema.get("inputSchema") or {}),
-                        capabilities=capabilities,
-                    )
+                tool = McpTool(
+                    client,
+                    remote_name,
+                    str(schema.get("description") or ""),
+                    dict(schema.get("inputSchema") or {}),
+                    capabilities=capabilities,
                 )
-    except Exception:
-        McpConnectionSet(clients).close()
-        raise
-    return tools, McpConnectionSet(clients)
+                if tool.name in known_names or tool.name in server_names:
+                    raise ValueError(f"duplicate normalized MCP Tool name: {tool.name}")
+                server_names.add(tool.name)
+                server_tools.append(tool)
+        except Exception as error:  # noqa: BLE001 - isolate one broken server
+            try:
+                if client is not None:
+                    client.close()
+            except (AttributeError, OSError):
+                pass
+            errors.append({"name": config.name, "status": "error", "error": str(error)})
+            continue
+        known_names.update(server_names)
+        tools.extend(server_tools)
+        assert client is not None
+        clients.append(client)
+    return tools, McpConnectionSet(clients, errors)
 
 
 def load_mcp_config(path: str | Path) -> list[McpServerConfig]:
@@ -390,9 +539,38 @@ def load_mcp_config(path: str | Path) -> list[McpServerConfig]:
                 },
                 sandbox_image=(str(raw["sandboxImage"]) if raw.get("sandboxImage") else None),
                 network=str(raw.get("network") or "none"),
+                reconnect=bool(raw.get("reconnect", True)),
+                circuit_failures=int(raw.get("circuitFailures") or 3),
+                circuit_cooldown=float(raw.get("circuitCooldown") or 30.0),
             )
         )
     return configs
+
+
+def _make_transport(config: McpServerConfig) -> McpTransport:
+    if config.transport == "stdio":
+        command = list(config.command)
+        if not command:
+            raise ValueError(f"MCP stdio server {config.name!r} requires command")
+        if config.sandbox_image:
+            command = _docker_stdio_command(config, command)
+        return StdioTransport(command, env=config.env)
+    if config.transport == "http":
+        if not config.url:
+            raise ValueError(f"MCP HTTP server {config.name!r} requires url")
+        return HttpTransport(config.url, protocol=config.protocol, headers=config.headers)
+    raise ValueError(f"unsupported MCP transport: {config.transport}")
+
+
+def _server_capabilities(config: McpServerConfig) -> frozenset[str]:
+    if config.transport == "http":
+        return frozenset({"mcp", "network"})
+    capabilities = {"mcp", "process"}
+    if not config.sandbox_image or config.network != "none":
+        capabilities.add("network")
+    if not config.sandbox_image:
+        capabilities.update({"filesystem_read", "filesystem_write"})
+    return frozenset(capabilities)
 
 
 def _docker_stdio_command(config: McpServerConfig, command: list[str]) -> list[str]:

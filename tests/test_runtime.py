@@ -6,9 +6,8 @@ from forgeagent.checkpoints import CheckpointManager
 from forgeagent.context import ContextWindow
 from forgeagent.contracts import ModelReply, ToolCall, Usage
 from forgeagent.policies import PermissionPolicy, PlanningPolicy, PolicyPipeline, RunMode
-from forgeagent.registry import ToolRegistry
 from forgeagent.runtime import AgentRuntime
-from forgeagent.tools import build_builtin_tools
+from forgeagent.tools import ToolRegistry, build_builtin_tools
 from tests.helpers import ScriptedProvider
 
 
@@ -121,6 +120,7 @@ def test_runtime_checkpoints_a_write_and_undoes_it(tmp_path):
 
     assert runtime.run("create proof") == "done"
     assert (tmp_path / "proof.txt").read_text(encoding="utf-8") == "made"
+    assert runtime.memory.files_modified == ["proof.txt"]
     assert "removed newly-created proof.txt" in runtime.undo()
     assert not (tmp_path / "proof.txt").exists()
 

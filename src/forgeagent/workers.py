@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
+import subprocess
 import threading
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, ClassVar
 
 from .tools import Tool, ToolEffect
@@ -28,6 +32,9 @@ class TaskRecord:
     completed_at: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    isolation: str = "shared"
+    workspace: str = ""
+    branch: str = ""
 
 
 @dataclass(frozen=True)
@@ -41,9 +48,28 @@ class SubAgentManager:
     """Owns child task state; workers share infrastructure, not conversation state."""
 
     def __init__(
-        self, run_task: Callable[[str], str | ChildRunResult], *, max_workers: int = 3
+        self,
+        run_task: Callable[..., str | ChildRunResult],
+        *,
+        workspace: str | Path | None = None,
+        worktree_root: str | Path | None = None,
+        max_workers: int = 3,
     ):
         self.run_task = run_task
+        self.workspace = Path(workspace).expanduser().resolve() if workspace else None
+        self.worktree_root = (
+            Path(worktree_root).expanduser()
+            if worktree_root
+            else Path.home() / ".forgeagent" / "worktrees"
+        )
+        parameters = inspect.signature(run_task).parameters.values()
+        self._passes_workspace = any(
+            item.kind is inspect.Parameter.VAR_POSITIONAL for item in parameters
+        ) or sum(
+            item.kind
+            in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+            for item in parameters
+        ) >= 2
         self._pool = ThreadPoolExecutor(
             max_workers=max(1, max_workers), thread_name_prefix="forge-subagent"
         )
@@ -51,12 +77,17 @@ class SubAgentManager:
         self._futures: dict[str, Future[str]] = {}
         self._lock = threading.RLock()
 
-    def submit(self, task: str, *, background: bool) -> TaskRecord:
+    def submit(
+        self, task: str, *, background: bool, isolation: str = "shared"
+    ) -> TaskRecord:
+        if isolation not in {"shared", "worktree"}:
+            raise ValueError("isolation must be shared or worktree")
         task_id = uuid.uuid4().hex[:12]
         record = TaskRecord(
             task_id=task_id,
             task=task,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            isolation=isolation,
         )
         with self._lock:
             self._records[task_id] = record
@@ -99,7 +130,15 @@ class SubAgentManager:
             record.started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             task = record.task
         try:
-            child_result = self.run_task(task)
+            child_workspace, branch = self._prepare_workspace(record)
+            with self._lock:
+                record.workspace = str(child_workspace)
+                record.branch = branch
+            child_result = (
+                self.run_task(task, child_workspace)
+                if self._passes_workspace
+                else self.run_task(task)
+            )
         except Exception as error:  # noqa: BLE001 - child failure must not crash parent
             with self._lock:
                 record.status = "failed"
@@ -124,12 +163,52 @@ class SubAgentManager:
             record.completed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         return bounded
 
+    def _prepare_workspace(self, record: TaskRecord) -> tuple[Path, str]:
+        workspace = self.workspace or Path.cwd().resolve()
+        if record.isolation == "shared":
+            return workspace, ""
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("worktree isolation requires a Git repository")
+        repository = Path(completed.stdout.strip()).resolve()
+        key = hashlib.sha256(str(repository).encode("utf-8")).hexdigest()[:12]
+        target = self.worktree_root / key / record.task_id
+        target.parent.mkdir(parents=True, exist_ok=True)
+        branch = f"forgeagent/agent-{record.task_id}"
+        created = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                str(target),
+                "HEAD",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if created.returncode != 0:
+            detail = created.stderr.strip() or created.stdout.strip()
+            raise RuntimeError(f"cannot create Sub-Agent worktree: {detail}")
+        return target.resolve(), branch
+
 
 class SubAgentTool(Tool):
     name = "subagent"
     description = (
         "Delegate an isolated reasoning task to a child Agent. Foreground returns the result; "
-        "background returns a task id for later polling."
+        "background returns a task id for later polling. isolation=worktree creates a retained "
+        "Git branch and checkout from HEAD (uncommitted changes are excluded); it is never "
+        "merged automatically."
     )
     effect = ToolEffect.PROCESS
     capabilities = frozenset({"subagent", "process"})
@@ -139,6 +218,7 @@ class SubAgentTool(Tool):
         "properties": {
             "task": {"type": "string"},
             "run_mode": {"type": "string", "enum": ["foreground", "background"]},
+            "isolation": {"type": "string", "enum": ["shared", "worktree"]},
         },
         "required": ["task"],
         "additionalProperties": False,
@@ -147,12 +227,20 @@ class SubAgentTool(Tool):
     def __init__(self, manager: SubAgentManager):
         self.manager = manager
 
-    def execute(self, task: str, run_mode: str = "foreground") -> str:
+    def execute(
+        self, task: str, run_mode: str = "foreground", isolation: str = "shared"
+    ) -> str:
         if not task.strip():
             return "Error: Sub-Agent task must not be empty"
         if run_mode not in {"foreground", "background"}:
             return "Error: run_mode must be foreground or background"
-        record = self.manager.submit(task, background=run_mode == "background")
+        if isolation not in {"shared", "worktree"}:
+            return "Error: isolation must be shared or worktree"
+        record = self.manager.submit(
+            task,
+            background=run_mode == "background",
+            isolation=isolation,
+        )
         return json.dumps(asdict(record), ensure_ascii=False, indent=2)
 
 

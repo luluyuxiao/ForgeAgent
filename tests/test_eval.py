@@ -7,9 +7,8 @@ from forgeagent.context import ContextWindow
 from forgeagent.contracts import ModelReply, Usage
 from forgeagent.eval import EvalCase, evaluate_case
 from forgeagent.policies import PermissionPolicy, PolicyPipeline
-from forgeagent.registry import ToolRegistry
 from forgeagent.runtime import AgentRuntime
-from forgeagent.tools import build_builtin_tools
+from forgeagent.tools import ToolRegistry, build_builtin_tools
 from tests.helpers import ScriptedProvider
 
 
