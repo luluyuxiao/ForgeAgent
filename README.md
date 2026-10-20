@@ -1,5 +1,7 @@
 # ForgeAgent
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 ForgeAgent is a compact, policy-driven Coding Agent / Agent Harness. It keeps
 model transport, context budgeting, authorization, scheduling, execution,
 persistence and observability behind separate interfaces instead of placing all
