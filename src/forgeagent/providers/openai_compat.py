@@ -17,6 +17,7 @@ from openai import (
 )
 
 from ..contracts import Message, ModelReply, TokenCallback, ToolCall, Usage
+from .fallback import PartialResponseError
 
 
 class OpenAICompatibleProvider:
@@ -74,7 +75,11 @@ class OpenAICompatibleProvider:
                 ):
                     include_usage = False
                     continue
-                if failure.emitted or attempt >= self.retries or not _retryable(error):
+                if failure.emitted:
+                    raise PartialResponseError(
+                        f"{self.model} stream failed after output or Tool Call data began"
+                    ) from error
+                if attempt >= self.retries or not _retryable(error):
                     raise error
                 time.sleep(self.retry_base_seconds * (2**attempt))
             except BadRequestError as error:

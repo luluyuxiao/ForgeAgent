@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from forgeagent.contracts import Usage
 from forgeagent.policies import RunMode
 from forgeagent.session import SessionState, SessionStore
@@ -17,6 +18,8 @@ def test_session_roundtrip_preserves_both_histories(tmp_path):
         transcript=[{"role": "user", "content": "full"}],
         active_messages=[{"role": "system", "content": "compacted"}],
         usage=Usage(12, 4),
+        checkpoints=[{"call_id": "c1", "tool": "write_file", "files": []}],
+        active_tools=["now", "read_file"],
     )
 
     path = store.save(state)
@@ -27,6 +30,8 @@ def test_session_roundtrip_preserves_both_histories(tmp_path):
     assert restored.active_messages == state.active_messages
     assert restored.mode is RunMode.PLANNING
     assert restored.usage.total_tokens == 16
+    assert restored.checkpoints == state.checkpoints
+    assert restored.active_tools == state.active_tools
 
 
 def test_session_id_cannot_escape_store(tmp_path):
@@ -44,4 +49,3 @@ def test_unknown_session_and_invalid_document_are_clear_errors(tmp_path):
     (tmp_path / "bad.json").write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
     with pytest.raises(TypeError):
         store.load("bad")
-

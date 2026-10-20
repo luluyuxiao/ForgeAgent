@@ -26,10 +26,12 @@ class SessionState:
     transcript: list[Message] = field(default_factory=list)
     active_messages: list[Message] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    checkpoints: list[dict[str, Any]] = field(default_factory=list)
+    active_tools: list[str] = field(default_factory=list)
     updated_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
-    version: int = 1
+    version: int = 2
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -49,6 +51,8 @@ class SessionState:
                 int(usage.get("prompt_tokens") or 0),
                 int(usage.get("completion_tokens") or 0),
             ),
+            checkpoints=list(data.get("checkpoints") or []),
+            active_tools=[str(item) for item in (data.get("active_tools") or [])],
             updated_at=str(data.get("updated_at") or ""),
             version=int(data.get("version") or 1),
         )
@@ -91,7 +95,7 @@ class SessionStore:
         if not isinstance(data, dict):
             raise TypeError(f"invalid session document: {target}")
         state = SessionState.from_dict(data)
-        if state.version != 1:
+        if state.version not in {1, 2}:
             raise ValueError(f"unsupported session version: {state.version}")
         return state
 

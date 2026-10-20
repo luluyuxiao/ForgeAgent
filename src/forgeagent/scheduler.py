@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -54,6 +55,7 @@ class BatchScheduler:
         calls: list[ToolCall],
         *,
         on_event: EventCallback | None = None,
+        before_execute: Callable[[ToolCall], None] | None = None,
     ) -> dict[str, str]:
         results: dict[str, str] = {}
         waves = self.plan(calls)
@@ -69,12 +71,16 @@ class BatchScheduler:
             )
             if len(wave) == 1:
                 item = wave[0]
-                results[item.call.id] = self._execute_one(item.call, on_event)
+                results[item.call.id] = self._execute_one(
+                    item.call, on_event, before_execute
+                )
                 continue
             workers = min(self.max_workers, len(wave))
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="forge-tool") as pool:
                 futures = {
-                    pool.submit(self._execute_one, item.call, on_event): item.call
+                    pool.submit(
+                        self._execute_one, item.call, on_event, before_execute
+                    ): item.call
                     for item in wave
                 }
                 for future in as_completed(futures):
@@ -84,7 +90,14 @@ class BatchScheduler:
         _emit(on_event, "batch_completed", total=len(calls))
         return results
 
-    def _execute_one(self, call: ToolCall, on_event: EventCallback | None) -> str:
+    def _execute_one(
+        self,
+        call: ToolCall,
+        on_event: EventCallback | None,
+        before_execute: Callable[[ToolCall], None] | None,
+    ) -> str:
+        if before_execute is not None:
+            before_execute(call)
         _emit(on_event, "tool_started", call_id=call.id, tool=call.name)
         result = self.registry.execute(call)
         _emit(

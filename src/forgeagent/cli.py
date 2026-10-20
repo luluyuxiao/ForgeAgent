@@ -9,24 +9,18 @@ from dataclasses import replace
 from pathlib import Path
 
 from .config import Settings
-from .context import ContextWindow
-from .policies import (
-    CapabilityPolicy,
-    PermissionPolicy,
-    PlanningPolicy,
-    PolicyPipeline,
-    RunMode,
-)
-from .providers import OpenAICompatibleProvider
-from .registry import ToolRegistry
+from .factory import RuntimeOptions, create_runtime
+from .policies import RunMode
 from .runtime import AgentRuntime
 from .session import SessionStore
-from .tools import build_builtin_tools
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ForgeAgent local coding-agent runtime")
     parser.add_argument("-p", "--prompt", help="run one prompt and exit")
+    parser.add_argument(
+        "--json", action="store_true", help="emit JSONL events (requires --prompt)"
+    )
     parser.add_argument("--workspace", default=".", help="workspace root")
     parser.add_argument("--model")
     parser.add_argument("--base-url")
@@ -36,12 +30,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session", help="autosave under this session id")
     parser.add_argument("--resume", help="resume a saved session")
     parser.add_argument("--yes", action="store_true", help="pre-approve stateful tools")
+    parser.add_argument("--sandbox", choices=["local", "docker"])
+    parser.add_argument("--sandbox-image")
+    parser.add_argument("--sandbox-network", choices=["none", "bridge"])
+    parser.add_argument("--mcp-config", help="JSON file describing MCP servers")
+    parser.add_argument("--trace", help="append runtime events to this JSONL file")
+    parser.add_argument(
+        "--trace-content", action="store_true", help="include prompts/arguments in trace"
+    )
+    parser.add_argument("--no-summary", action="store_true", help="disable LLM context summary")
+    parser.add_argument("--no-subagents", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = _settings_with_args(Settings.from_env(), args)
+    if args.json and args.prompt is None:
+        print("--json requires --prompt", file=sys.stderr)
+        return 2
     if not settings.api_key:
         print("FORGE_API_KEY is not set. Copy .env.example to .env and add a key.", file=sys.stderr)
         return 2
@@ -50,7 +57,22 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     interactive = args.prompt is None
-    runtime = _create_runtime(settings, args, interactive=interactive)
+    try:
+        bundle = create_runtime(
+            settings,
+            RuntimeOptions(
+                workspace=Path(args.workspace),
+                interactive=interactive,
+                allow_all=bool(args.yes),
+                ask_permission=_ask_permission,
+                enable_subagents=not args.no_subagents,
+                trace_content=args.trace_content,
+            ),
+        )
+    except Exception as error:  # noqa: BLE001 - configuration boundary reports all failures
+        print(f"Startup failed: {type(error).__name__}: {error}", file=sys.stderr)
+        return 2
+    runtime = bundle.runtime
     store = SessionStore(settings.session_dir)
     session_id = args.resume or args.session
     if args.resume:
@@ -58,14 +80,23 @@ def main(argv: list[str] | None = None) -> int:
             runtime.load(store, args.resume)
         except (KeyError, ValueError, OSError) as error:
             print(f"Cannot resume session: {error}", file=sys.stderr)
+            bundle.close()
             return 2
 
     if args.prompt is not None:
-        result = _run_and_render(runtime, args.prompt)
-        if session_id:
-            runtime.save(store, session_id)
-        return 0 if result else 1
-    return _repl(runtime, store, session_id)
+        try:
+            result = _run_json(runtime, args.prompt) if args.json else _run_and_render(
+                runtime, args.prompt
+            )
+            if session_id:
+                runtime.save(store, session_id)
+            return 0 if result else 1
+        finally:
+            bundle.close()
+    try:
+        return _repl(runtime, store, session_id)
+    finally:
+        bundle.close()
 
 
 def _settings_with_args(settings: Settings, args) -> Settings:
@@ -76,36 +107,12 @@ def _settings_with_args(settings: Settings, args) -> Settings:
         max_rounds=args.max_rounds or settings.max_rounds,
         context_tokens=args.context_tokens or settings.context_tokens,
         session_dir=(Path(args.session_dir).expanduser() if args.session_dir else settings.session_dir),
-    )
-
-
-def _create_runtime(settings: Settings, args, *, interactive: bool) -> AgentRuntime:
-    workspace = Path(args.workspace).expanduser().resolve()
-    registry = ToolRegistry(build_builtin_tools(workspace))
-    permission = PermissionPolicy(
-        _ask_permission if interactive else None,
-        allow_all=bool(args.yes),
-    )
-    policies = PolicyPipeline(
-        [CapabilityPolicy(), PlanningPolicy(), permission]
-    )
-    provider = OpenAICompatibleProvider(
-        model=settings.model,
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-        max_output_tokens=settings.max_output_tokens,
-    )
-    context = ContextWindow(
-        settings.context_tokens,
-        output_reserve=settings.max_output_tokens,
-    )
-    return AgentRuntime(
-        provider=provider,
-        registry=registry,
-        policies=policies,
-        context=context,
-        max_rounds=settings.max_rounds,
-        workspace=workspace,
+        sandbox=args.sandbox or settings.sandbox,
+        sandbox_image=args.sandbox_image or settings.sandbox_image,
+        sandbox_network=args.sandbox_network or settings.sandbox_network,
+        mcp_config=(Path(args.mcp_config).expanduser() if args.mcp_config else settings.mcp_config),
+        trace_path=(Path(args.trace).expanduser() if args.trace else settings.trace_path),
+        llm_summary=False if args.no_summary else settings.llm_summary,
     )
 
 
@@ -151,7 +158,24 @@ def _repl(runtime: AgentRuntime, store: SessionStore, session_id: str | None) ->
             )
             continue
         elif lowered == "/tools":
-            print("\n".join(runtime.registry.names()))
+            active = set(runtime.catalog.names()) if runtime.catalog else set(runtime.registry.names())
+            print(
+                "\n".join(
+                    f"{'*' if name in active else '-'} {name}" for name in runtime.registry.names()
+                )
+            )
+            continue
+        elif lowered.startswith("/catalog "):
+            query = user_input.split(maxsplit=1)[1]
+            rows = runtime.catalog.search(query) if runtime.catalog else []
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            continue
+        elif lowered == "/tasks":
+            tool = runtime.registry.get("task_status")
+            print(tool.execute() if tool else "Sub-Agents are disabled.")
+            continue
+        elif lowered == "/undo":
+            print(runtime.undo())
             continue
         elif lowered == "/sessions":
             rows = store.list()
@@ -215,13 +239,40 @@ def _run_and_render(runtime: AgentRuntime, prompt: str) -> str:
     return result
 
 
+def _run_json(runtime: AgentRuntime, prompt: str) -> str:
+    outcome = "completed"
+
+    def on_event(event: str, fields: dict) -> None:
+        nonlocal outcome
+        if event == "run_limited":
+            outcome = "limited"
+        print(json.dumps({"event": event, **fields}, ensure_ascii=False, default=str), flush=True)
+
+    result = runtime.run(prompt, on_event=on_event)
+    usage = runtime.provider.total_usage
+    print(
+        json.dumps(
+            {
+                "event": "final",
+                "outcome": outcome,
+                "content": result,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    return result
+
+
 def _ask_permission(tool_name: str, arguments: dict) -> str:
     rendered = json.dumps(arguments, ensure_ascii=False)
     if len(rendered) > 300:
         rendered = rendered[:300] + "..."
     print(f"\nPermission requested: {tool_name}({rendered})")
     while True:
-        answer = input("[y] once  [a] always this Tool  [n] deny: ").strip().lower()
+        answer = input("[y] once  [a] always this exact action  [n] deny: ").strip().lower()
         if answer in {"y", "yes"}:
             return "once"
         if answer in {"a", "always"}:
@@ -236,6 +287,9 @@ _HELP = """\
 /approve              approve the plan and execute
 /tokens               show provider token usage
 /tools                list registered Tools
+/catalog <query>      search active and hidden Tools
+/tasks                show background Sub-Agent tasks
+/undo                 restore files from the latest checkpoint
 /sessions             list saved sessions
 /save <id>            save the current session
 /resume <id>          restore a session

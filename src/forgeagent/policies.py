@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -91,16 +93,17 @@ class PermissionPolicy:
     def __init__(self, ask: AskCallback | None = None, *, allow_all: bool = False):
         self.ask = ask
         self.allow_all = allow_all
-        self._always: set[str] = set()
+        self._always_scopes: set[str] = set()
         self._lock = threading.Lock()
 
     def evaluate(self, call: ToolCall, tool: Tool, context: PolicyContext) -> Decision:
         if tool.effect in self._NO_EXTERNAL_MUTATION:
             return Decision.allow(self.name, "read_only")
+        scope = _permission_scope(call)
         with self._lock:
             if self.allow_all:
                 return Decision.allow(self.name, "allow_all")
-            if call.name in self._always:
+            if scope in self._always_scopes:
                 return Decision.allow(self.name, "always_cached")
         if self.ask is None:
             return Decision.deny(
@@ -111,7 +114,7 @@ class PermissionPolicy:
         answer = self.ask(call.name, call.arguments).strip().lower()
         if answer == "always":
             with self._lock:
-                self._always.add(call.name)
+                self._always_scopes.add(scope)
             return Decision.allow(self.name, "always")
         if answer == "once":
             return Decision.allow(self.name, "once")
@@ -134,3 +137,16 @@ class PolicyPipeline:
                 return last
         return last
 
+
+def _permission_scope(call: ToolCall) -> str:
+    """Return a session-only grant key narrow enough to avoid approving a whole Tool class."""
+    if call.name == "shell":
+        return f"shell:{str(call.arguments.get('command', '')).strip()}"
+    if call.name in {"write_file", "replace_text"}:
+        return f"{call.name}:{str(call.arguments.get('path', '')).strip()}"
+    if call.name == "apply_patch":
+        patch = str(call.arguments.get("patch", ""))
+        digest = hashlib.sha256(patch.encode("utf-8")).hexdigest()
+        return f"apply_patch:{digest}"
+    rendered = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)
+    return f"{call.name}:{rendered}"

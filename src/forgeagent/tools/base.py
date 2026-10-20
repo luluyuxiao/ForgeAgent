@@ -60,7 +60,10 @@ class Tool(ABC):
         access = Access.READ if self.effect is ToolEffect.READ else Access.WRITE
         return (ResourceClaim("*", access),)
 
+    def checkpoint_paths(self, arguments: dict[str, Any]) -> tuple[str, ...]:
+        """Workspace-relative files that can be restored for this call."""
+        return ()
+
     @abstractmethod
     def execute(self, **arguments: Any) -> str:
         raise NotImplementedError
-

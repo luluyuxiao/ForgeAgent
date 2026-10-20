@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import subprocess
+
+from forgeagent.checkpoints import CheckpointManager
 from forgeagent.context import ContextWindow
 from forgeagent.contracts import ModelReply, ToolCall, Usage
 from forgeagent.policies import PermissionPolicy, PlanningPolicy, PolicyPipeline, RunMode
 from forgeagent.registry import ToolRegistry
 from forgeagent.runtime import AgentRuntime
 from forgeagent.tools import build_builtin_tools
-
 from tests.helpers import ScriptedProvider
 
 
@@ -102,3 +104,48 @@ def test_round_limit_is_enforced(tmp_path):
     assert result == "Stopped after reaching the 2-round limit."
     assert runtime.transcript[-1] == {"role": "assistant", "content": result}
 
+
+def test_runtime_checkpoints_a_write_and_undoes_it(tmp_path):
+    runtime = _runtime(
+        tmp_path,
+        [
+            ModelReply(
+                tool_calls=[
+                    ToolCall("c1", "write_file", {"path": "proof.txt", "content": "made"})
+                ]
+            ),
+            ModelReply(content="done"),
+        ],
+    )
+    runtime.checkpoints = CheckpointManager(tmp_path)
+
+    assert runtime.run("create proof") == "done"
+    assert (tmp_path / "proof.txt").read_text(encoding="utf-8") == "made"
+    assert "removed newly-created proof.txt" in runtime.undo()
+    assert not (tmp_path / "proof.txt").exists()
+
+
+def test_runtime_checkpoints_a_multi_file_patch_and_undoes_it(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    target = tmp_path / "proof.txt"
+    target.write_text("before\n", encoding="utf-8")
+    patch = """\
+--- a/proof.txt
++++ b/proof.txt
+@@ -1 +1 @@
+-before
++after
+"""
+    runtime = _runtime(
+        tmp_path,
+        [
+            ModelReply(tool_calls=[ToolCall("c1", "apply_patch", {"patch": patch})]),
+            ModelReply(content="done"),
+        ],
+    )
+    runtime.checkpoints = CheckpointManager(tmp_path)
+
+    assert runtime.run("patch proof") == "done"
+    assert target.read_text(encoding="utf-8") == "after\n"
+    assert "restored proof.txt" in runtime.undo()
+    assert target.read_text(encoding="utf-8") == "before\n"

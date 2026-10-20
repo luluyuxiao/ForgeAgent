@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "name": "architecture-summary",
+      "prompt": "Read README.md and summarize the project in one paragraph.",
+      "output_contains": ["ForgeAgent"],
+      "output_not_contains": ["Traceback"],
+      "expected_tools": ["read_file"],
+      "forbidden_tools": ["write_file", "apply_patch"],
+      "max_seconds": 60,
+      "max_total_tokens": 20000,
+      "max_tool_calls": 8,
+      "test_command": "python -m compileall -q src tests",
+      "test_timeout": 60,
+      "expected_test_exit_code": 0
+    }
+  ]
+}

@@ -72,3 +72,30 @@ def test_collapse_keeps_tool_call_and_result_in_same_block():
                 cursor += 1
             assert observed == expected
 
+
+def test_llm_summary_replaces_old_blocks_but_not_source():
+    class FakeSummarizer:
+        def __init__(self):
+            self.seen = []
+
+        def summarize(self, messages, target_tokens):
+            self.seen = messages
+            return "important old decision"
+
+    messages = [{"role": "user", "content": f"old {index} " * 200} for index in range(6)]
+    original = copy.deepcopy(messages)
+    summarizer = FakeSummarizer()
+    window = ContextWindow(
+        500,
+        output_reserve=40,
+        safety_margin=20,
+        summarizer=summarizer,
+        summary_target_tokens=128,
+    )
+
+    prepared = window.prepare("system", messages, [])
+
+    assert prepared.report.summarized_messages > 0
+    assert any("important old decision" in str(item.get("content")) for item in prepared.active_messages)
+    assert summarizer.seen
+    assert messages == original

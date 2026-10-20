@@ -61,3 +61,17 @@ def test_noninteractive_permission_fails_closed(tmp_path):
     assert not decision.allowed
     assert decision.code == "non_interactive"
 
+
+def test_always_permission_is_scoped_to_the_exact_shell_command(tmp_path):
+    registry = ToolRegistry(build_builtin_tools(tmp_path))
+    answers = iter(["always", "deny"])
+    policy = PermissionPolicy(lambda _name, _arguments: next(answers))
+    tool = registry.require("shell")
+
+    first = policy.evaluate(_call("shell", command="pytest -q"), tool, PolicyContext())
+    repeated = policy.evaluate(_call("shell", command="pytest -q"), tool, PolicyContext())
+    different = policy.evaluate(_call("shell", command="git push"), tool, PolicyContext())
+
+    assert first.allowed
+    assert repeated.allowed and repeated.code == "always_cached"
+    assert not different.allowed

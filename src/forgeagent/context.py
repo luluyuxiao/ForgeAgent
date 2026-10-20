@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from .contracts import Message
 
@@ -14,12 +14,17 @@ class ContextLimitError(RuntimeError):
     pass
 
 
+class Summarizer(Protocol):
+    def summarize(self, messages: list[Message], target_tokens: int) -> str: ...
+
+
 @dataclass(frozen=True)
 class CompactionReport:
     before_tokens: int
     after_tokens: int
     snipped_tool_results: int = 0
     collapsed_messages: int = 0
+    summarized_messages: int = 0
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,8 @@ class ContextWindow:
         output_reserve: int = 8192,
         safety_margin: int = 1024,
         old_tool_result_chars: int = 4000,
+        summarizer: Summarizer | None = None,
+        summary_target_tokens: int = 1200,
     ):
         if max_tokens <= output_reserve + safety_margin:
             raise ValueError("context window must exceed output reserve and safety margin")
@@ -44,6 +51,8 @@ class ContextWindow:
         self.output_reserve = output_reserve
         self.safety_margin = safety_margin
         self.old_tool_result_chars = old_tool_result_chars
+        self.summarizer = summarizer
+        self.summary_target_tokens = max(128, summary_target_tokens)
 
     @property
     def input_budget(self) -> int:
@@ -87,14 +96,49 @@ class ContextWindow:
                 snipped += 1
 
         collapsed = 0
+        summarized = 0
         blocks = _message_blocks(active)
+
+        # Preserve the newest protocol block verbatim. Older material can be summarized,
+        # while the durable Transcript remains untouched by this operation.
+        if self.summarizer is not None and len(blocks) > 1:
+            current = fixed_tokens + estimate_tokens(_flatten(blocks))
+            if current > self.input_budget:
+                old_blocks = blocks[:-1]
+                try:
+                    summary = self.summarizer.summarize(
+                        _flatten(old_blocks), self.summary_target_tokens
+                    )
+                except Exception:  # noqa: BLE001 - collapse is the deliberate fallback
+                    summary = ""
+                if summary:
+                    maximum_chars = self.summary_target_tokens * 4
+                    if len(summary) > maximum_chars:
+                        summary = summary[:maximum_chars] + "\n[summary truncated]"
+                    summarized = sum(len(block) for block in old_blocks)
+                    blocks = [
+                        [
+                            {
+                                "role": "system",
+                                "content": (
+                                    f"[Summary of {summarized} earlier messages]\n{summary}"
+                                ),
+                            }
+                        ],
+                        blocks[-1],
+                    ]
+
         def collapsed_tokens() -> int:
             note_tokens = estimate_tokens(_compaction_note(collapsed)) if collapsed else 0
             return fixed_tokens + note_tokens + estimate_tokens(_flatten(blocks))
 
         while collapsed_tokens() > self.input_budget and len(blocks) > 1:
             removed = blocks.pop(0)
-            collapsed += len(removed)
+            if summarized and removed[0].get("role") == "system":
+                collapsed += summarized
+                summarized = 0
+            else:
+                collapsed += len(removed)
 
         if collapsed:
             note = _compaction_note(collapsed)
@@ -112,7 +156,7 @@ class ContextWindow:
         return PreparedContext(
             [system, *active],
             active,
-            CompactionReport(before, after, snipped, collapsed),
+            CompactionReport(before, after, snipped, collapsed, summarized),
         )
 
     def _shrink_plain_content(self, active: list[Message], fixed_tokens: int) -> list[Message]:

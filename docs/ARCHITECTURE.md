@@ -1,126 +1,142 @@
 # Architecture
 
-ForgeAgent separates five decisions that are often collapsed into one Agent
-class:
+ForgeAgent has one coordinator, `AgentRuntime`, and small components with
+separate reasons to change:
 
-1. `ChatProvider` decides how a model request is transported.
-2. `ContextWindow` decides what history fits into the next request.
-3. `PolicyPipeline` decides whether a proposed Tool Call is authorized.
-4. `BatchScheduler` decides which admitted calls may overlap.
-5. `ToolRegistry` validates and executes the selected capability.
+| Component | Decision it owns |
+|---|---|
+| `ChatProvider` | how one model request is transported |
+| `FallbackProvider` | which ordered route receives a request |
+| `ContextWindow` | what fits into the next model request |
+| `ToolCatalog` | which discovered schemas are currently visible |
+| `ToolRegistry` | Tool identity, validation and execution |
+| `PolicyPipeline` | whether a proposed call is authorized |
+| `BatchScheduler` | which calls may overlap |
+| `CheckpointManager` | which file bytes can be restored |
+| `JsonlTrace` | which lifecycle events are persisted |
+| `SubAgentManager` | child/background task state |
+| Repository instructions | which repo-local rules enter the System Prompt |
 
-`AgentRuntime` coordinates those interfaces but does not implement their policy.
-
-## Request state machine
+## Main request state machine
 
 ```text
 IDLE
-  │ user input
+  │ user input → append full Transcript + Active Context
   ▼
-PREPARING ── context failure ──► FAILED
-  │
+PREPARE_CONTEXT
+  │ system + active schemas + history + output reserve + margin
   ▼
-MODEL_REQUEST
+MODEL_REQUEST ── route failure before stream ──► FALLBACK_PROVIDER
   │
-  ├── final text ──────────────► COMPLETE
+  ├── final text ──────────────────────────────► COMPLETE
   │
   └── Tool Calls
-          │
           ▼
-       ADMISSION
-          │ allowed calls
+      CATALOG CHECK
           ▼
-       EXECUTION
-          │ one observation per call id
-          └────────────────────► PREPARING
+      CAPABILITY → PLAN → PERMISSION
+          │ denied call becomes one Tool observation
+          ▼
+      SCHEDULE WAVES
+          ▼
+      CHECKPOINT → TOOL EXECUTION → OBSERVATION
+          └────────────────────────────────────► PREPARE_CONTEXT
 ```
 
-The loop is bounded by `max_rounds`. Tool failures are data; provider and
-context failures remain exceptions because silently routing around them would
-hide infrastructure problems.
+The loop stops on a model response without Tool Calls or at `max_rounds`.
+Results are appended in the model's original call order even if read-only calls
+finish in a different order.
 
-## Tool contract
+Root `AGENTS.md` and `.forgeagent/instructions.md` content is loaded once at
+runtime construction. Nested `AGENTS.md` paths are indexed in the prompt so the
+model can read the applicable file before editing within that directory, while
+unrelated nested instructions do not consume every request's context budget.
 
-Each Tool declares:
+## Tool exposure and authority
 
-- model-facing `name`, `description`, and JSON Schema `parameters`;
-- an `effect` used by Plan Mode and Permission;
-- `capabilities` used by authority policy;
-- argument-dependent `resources` used by scheduling;
-- whether its implementation is `parallel_safe`.
+Registration and exposure are different. `ToolRegistry` owns every executable
+Tool instance; `ToolCatalog` owns the active subset whose JSON Schemas are sent
+to the model. A hidden Tool cannot be executed by a hallucinated direct call.
+The two catalog Tools let the model search and activate a small working set.
 
-The model receives only schemas from one `ToolRegistry` instance. Omitting a
-Tool is therefore a stronger capability boundary than asking the model not to
-call it.
-
-## Policy composition
-
-The default CLI pipeline is:
+Policy order is fixed by composition:
 
 ```text
 CapabilityPolicy → PlanningPolicy → PermissionPolicy
 ```
 
-Each policy returns a structured decision and stops the pipeline on denial.
-Planning is based on the declared effect, so newly registered read-only Tools
-work without editing a global name whitelist.
+MCP tools do not bypass it. Docker sandboxing happens later, during execution,
+and is defense in depth rather than authorization.
 
-## Concurrency
+Interactive remembered approval is scoped to an exact command, file path or
+canonical argument object and remains process-local. It never serializes into a
+saved Session as a blanket Tool grant.
 
-The scheduler builds deterministic waves in model-call order. A Tool with
-`parallel_safe = False` is a serial barrier. Parallel-safe calls may share a
-wave when no pair of `ResourceClaim` objects conflicts. Results are associated
-by Tool Call ID and appended to the conversation in original model order, not
-completion order.
-
-## Context and Transcript
-
-The Transcript is append-only. Active Context is a copy used for provider
-requests. `ContextWindow.prepare()` computes:
+## Code change and verification boundary
 
 ```text
-System Prompt
-+ Tool Schemas
-+ Active Context
-+ output reserve
-+ safety margin
+read/search ─► write/replace/apply_patch ─► git_diff ─► run_checks ─► final response
+                         │                                  │
+                         └──── file checkpoint              └── project config
 ```
 
-When the input budget is exceeded, older Tool Results are snipped first. The
-remaining history is partitioned into protocol blocks so an assistant Tool Call
-cannot be retained without all of its following observations. Old blocks are
-then collapsed into a marker. The original Transcript is not mutated.
+`apply_patch` validates a git-style patch with `git apply --check`, rejects
+paths outside the workspace and exposes affected paths to the checkpoint and
+resource schedulers. `run_checks` does not accept arbitrary model-provided
+commands: it executes only lint/test commands declared by the repository in
+`.forgeagent.json`. The commands still require process permission and run
+through the selected local or Docker executor.
 
-## Provider contract
+## Context and persistence
 
-`OpenAICompatibleProvider` consumes a stream completely before the runtime
-executes any Tool Call. Text and fragmented function names/arguments are
-reassembled by index. Retry is allowed only before any streamed content or Tool
-fragment has been observed, preventing duplicate visible output or ambiguous
-execution.
+```text
+append-only Transcript ───────────────────────────────► Session
+           │
+           └── copy ─► Active Context ─► compact ─────► Session
+```
 
-## Session contract
+Tool Call plus its Tool observations form an atomic block during collapse.
+The latest block remains available for at least one next model request. LLM
+summary is optional and failure-tolerant; deterministic collapse guarantees a
+path that does not depend on another provider call.
 
-Sessions store:
+Session v2 stores Transcript, Active Context, run mode, usage, active catalog
+names and bounded file checkpoints. It never stores API keys or remembered
+permission grants.
 
-- full Transcript;
-- compacted Active Context;
-- current mode;
-- model identifier;
-- cumulative usage.
+## MCP boundary
 
-They deliberately exclude credentials and permission grants. Writes use a
-temporary file, `fsync`, restrictive permissions, and atomic replacement.
+```text
+config → transport → McpClient.tools/list → McpTool proxies → ToolRegistry
+                                      tools/call ◄────────────┘
+```
 
-## Extension map
+`StdioTransport` serializes JSON-RPC requests over a child process.
+`HttpTransport` accepts JSON or SSE responses, tracks legacy session ids, and
+sends modern protocol/method headers. Multiple servers are flattened into one
+collision-checked registry namespace.
 
-| Feature | Extension point |
-|---|---|
-| Another provider | implement `ChatProvider` |
-| Docker execution | replace `ShellTool` with a container-backed Tool |
-| Hooks / audit | add a `ToolPolicy` and event sink |
-| MCP | discover remote schemas and register proxy `Tool` instances |
-| LLM summary | add a summarization strategy to `ContextWindow` |
-| Sub-Agent | create child `AgentRuntime` instances with separate state |
-| Structured trace | persist `on_event` records |
+## Sub-Agent boundary
 
+```text
+parent Tool Call
+    └── SubAgentManager
+          ├── foreground ─► child AgentRuntime ─► bounded final result
+          └── background ─► bounded thread pool ─► task_status
+```
+
+Children share configuration and workspace authority but not conversation,
+context, provider connection, or registry instance. Child registries omit the
+delegation Tools. Child exceptions are recorded in task state and converted to
+observations instead of crashing the parent.
+
+## Explicit limits
+
+- Background workers are in-process, not durable distributed jobs.
+- File checkpoints do not make shell, Docker, MCP, or network effects reversible.
+- The MCP client currently covers Tools only.
+- Docker protects shell/MCP process execution; it does not sandbox the LLM API.
+- JSON token estimation is approximate; the hard budget intentionally keeps a
+  safety margin.
+- Git checkpoints cover direct file and patch Tools; arbitrary Shell commands
+  still require an external Git/worktree strategy for transactional rollback.

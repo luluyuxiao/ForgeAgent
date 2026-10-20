@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "forgeagent-local"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small, policy-driven coding-agent runtime"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,6 +31,8 @@ dev = ["pytest>=8.0", "ruff>=0.9"]
 
 [project.scripts]
 forgeagent = "forgeagent.cli:main"
+forgeagent-eval = "forgeagent.eval:main"
+forgeagent-trace = "forgeagent.trace_viewer:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/forgeagent"]
@@ -41,4 +43,3 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-
