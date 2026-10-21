@@ -88,6 +88,9 @@ class Settings:
     max_cost_usd: float = 0.0
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
+    tool_embedding_model: str | None = None
+    tool_embedding_base_url: str | None = None
+    tool_embedding_api_key: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -132,6 +135,11 @@ class Settings:
             output_price_per_million=float(
                 os.getenv("FORGE_OUTPUT_PRICE_PER_MILLION", "0")
             ),
+            tool_embedding_model=os.getenv("FORGE_TOOL_EMBEDDING_MODEL") or None,
+            tool_embedding_base_url=(
+                os.getenv("FORGE_TOOL_EMBEDDING_BASE_URL") or None
+            ),
+            tool_embedding_api_key=os.getenv("FORGE_TOOL_EMBEDDING_API_KEY", ""),
         )
 
 

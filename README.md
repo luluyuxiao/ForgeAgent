@@ -15,7 +15,8 @@ not use non-public or leaked proprietary source code.
 
 - bounded ReAct loop, streaming, fragmented Tool Call assembly and retry;
 - ordered provider fallback with a no-replay-after-streaming guarantee;
-- instance-scoped `ToolRegistry`, lazy `ToolCatalog`, JSON Schema exposure;
+- instance-scoped `ToolRegistry`, lazy `ToolCatalog`, and BM25 plus optional
+  embedding-based Top-K Tool retrieval;
 - Permission, Plan Mode and per-Tool capability policies;
 - effect/resource-aware scheduling: independent reads overlap, writes serialize;
 - workspace-confined file tools plus local or hardened Docker shell execution;
@@ -103,6 +104,31 @@ whether it is authorized, and an executor performs it. Prompts, repository
 instructions, and Skills can guide behavior but cannot bypass policy, hooks, or
 the sandbox. Independent read-only Tools may overlap; conflicting resources and
 writes serialize.
+
+### Retrieval when the Tool set is large
+
+`ToolRegistry` owns every constructed Tool instance while `ToolCatalog` exposes
+only active schemas to the model. `search_tools` first removes candidates that
+lack an allowed capability, are unavailable in Plan Mode, or cannot be approved
+in a non-interactive run. It then ranks names, descriptions, capabilities, and
+effects with BM25 and returns Top-K candidates. The model uses `activate_tools`
+to expose selected schemas on the next round. Activation changes visibility;
+it never bypasses execution policy.
+
+Search is offline by default. An OpenAI-compatible embedding endpoint can add
+semantic recall:
+
+```bash
+FORGE_TOOL_EMBEDDING_MODEL=text-embedding-3-small
+FORGE_TOOL_EMBEDDING_BASE_URL=https://api.openai.com/v1
+FORGE_TOOL_EMBEDDING_API_KEY=your-key
+```
+
+With this enabled, the Catalog caches Tool-description vectors and fuses BM25
+with cosine similarity. Embedding failures fall back to BM25. Because query text
+and Tool metadata leave the process, `search_tools` declares a `NETWORK` effect
+and `network` capability and remains subject to permission policy. Embeddings are
+off by default, and project source is not part of the retrieval document.
 
 ## Install
 
@@ -498,6 +524,8 @@ file path or call arguments rather than granting an entire Tool class.
 - The Eval runner provides a reproducible offline framework, while the bundled
   manifest is a feature demonstration rather than a public coding-agent
   benchmark score.
+- Third-party tokens and cost from optional embedding-based Tool retrieval are
+  not included in the Agent's model-token or USD budget accounting.
 
 ## Test
 

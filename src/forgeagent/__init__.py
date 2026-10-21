@@ -14,11 +14,23 @@ from .policies import (
     PolicyPipeline,
     RunMode,
 )
-from .providers import FallbackProvider, OpenAICompatibleProvider, PartialResponseError
+from .providers import (
+    FallbackProvider,
+    OpenAICompatibleEmbedder,
+    OpenAICompatibleProvider,
+    PartialResponseError,
+)
 from .runtime import AgentRuntime
 from .sandbox import DockerExecutor, LocalExecutor
 from .session import SessionState, SessionStore
-from .tools import Tool, ToolCatalog, ToolEffect, ToolRegistry, build_builtin_tools
+from .tools import (
+    EmbeddingBackend,
+    Tool,
+    ToolCatalog,
+    ToolEffect,
+    ToolRegistry,
+    build_builtin_tools,
+)
 from .trace import JsonlTrace
 from .workers import SubAgentManager
 
@@ -35,12 +47,14 @@ __all__ = [
     "ContextWindow",
     "CostBudget",
     "DockerExecutor",
+    "EmbeddingBackend",
     "FallbackProvider",
     "JsonlTrace",
     "LocalExecutor",
     "McpClient",
     "McpTool",
     "ModelReply",
+    "OpenAICompatibleEmbedder",
     "OpenAICompatibleProvider",
     "PartialResponseError",
     "PermissionPolicy",

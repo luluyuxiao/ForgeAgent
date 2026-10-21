@@ -17,7 +17,11 @@ from .hooks import ToolHooks
 from .mcp import McpConnectionSet, McpTool, load_mcp_tools
 from .memory import MemoryUpdateTool, TaskMemory
 from .policies import CapabilityPolicy, PermissionPolicy, PlanningPolicy, PolicyPipeline
-from .providers import FallbackProvider, OpenAICompatibleProvider
+from .providers import (
+    FallbackProvider,
+    OpenAICompatibleEmbedder,
+    OpenAICompatibleProvider,
+)
 from .runtime import AgentRuntime
 from .sandbox import DockerExecutor, LocalExecutor
 from .tools import ToolCatalog, ToolRegistry, build_builtin_tools, install_catalog_tools
@@ -128,7 +132,21 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
             registry.register(TaskStatusTool(workers))
             core_names.add("task_status")
 
-    catalog = ToolCatalog(registry, active=core_names)
+    embedder = None
+    if settings.tool_embedding_model:
+        embedder = OpenAICompatibleEmbedder(
+            model=settings.tool_embedding_model,
+            api_key=settings.tool_embedding_api_key or settings.api_key,
+            base_url=settings.tool_embedding_base_url or settings.base_url,
+        )
+    catalog = ToolCatalog(
+        registry,
+        active=core_names,
+        embedder=embedder,
+        allowed_capabilities=options.allowed_capabilities,
+        interactive=options.interactive,
+        allow_all=options.allow_all,
+    )
     install_catalog_tools(catalog)
 
     def refresh_mcp() -> str:

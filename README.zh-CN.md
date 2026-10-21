@@ -10,7 +10,7 @@ ForgeAgent 是一个紧凑、由策略驱动的 Coding Agent / Agent Harness。�
 
 - 有边界的 ReAct 循环、流式输出、分片 Tool Call 组装与重试；
 - 按顺序进行 Provider 故障转移，并保证流式输出开始后不重放请求；
-- 实例级 `ToolRegistry`、延迟加载的 `ToolCatalog` 与 JSON Schema 暴露；
+- 实例级 `ToolRegistry`、延迟加载的 `ToolCatalog`，以及 BM25 + 可选 Embedding 的 Top-K 工具检索；
 - Permission、Plan Mode 与按 Tool 能力划分的策略；
 - 感知副作用和资源的调度：独立读取可并发，写入操作串行执行；
 - 限制在工作区内的文件工具，以及本地或强化 Docker Shell 执行；
@@ -90,6 +90,20 @@ Hook → BatchScheduler → Checkpoint（仅可恢复文件修改）
 ```
 
 这条链路刻意把“模型提出操作”“策略授权操作”和“执行器真正完成操作”分开：Prompt、仓库指令和 Skill 只能指导模型，不能跳过 Policy、Hook 或 Sandbox。独立且资源不冲突的读取型 Tool 可以并行；写入或资源冲突的 Tool 会串行执行。
+
+### 工具过多时的检索
+
+`ToolRegistry` 保存全部已创建的 Tool 实例，`ToolCatalog` 只向模型暴露当前激活的 Schema。`search_tools` 会先排除缺少 Capability、在 Plan Mode 中不可用，或在非交互模式下无法授权的候选项，再使用 BM25 对名称、描述、Capability 和 Effect 做关键词排序，最后返回 Top-K。模型通过 `activate_tools` 激活选中的 Tool，下一轮才会看到完整 Schema；激活只改变可见性，不会跳过执行时的 Policy。
+
+默认搜索完全离线。需要语义召回时，可以配置一个 OpenAI 兼容的 Embedding 端点：
+
+```bash
+FORGE_TOOL_EMBEDDING_MODEL=text-embedding-3-small
+FORGE_TOOL_EMBEDDING_BASE_URL=https://api.openai.com/v1
+FORGE_TOOL_EMBEDDING_API_KEY=your-key
+```
+
+启用后，Catalog 会缓存 Tool 描述向量，将 BM25 与余弦相似度融合后排序；Embedding 服务失败时自动退回 BM25。因为查询文本和 Tool 元数据会发送到外部服务，`search_tools` 会声明 `NETWORK` Effect 与 `network` Capability，并继续接受权限策略控制。Embedding 默认关闭，也不会把项目源码作为检索文本发送出去。
 
 ## 安装
 
@@ -346,6 +360,7 @@ Eval 默认不允许交互，并拒绝修改型 Tool。只有信任 Manifest 时
 - Session 会恢复对话、Active Context、记忆、已激活 Tool/Skill 和检查点，但不会恢复已经退出的 MCP 子进程、后台 Worker、临时权限授权或子 Agent 任务；
 - Worktree 子 Agent 不会复制父工作区的未提交修改，也不会自动合并或清理分支；共享工作区模式仍需要调用者避免并发修改同一文件；
 - Eval Runner 已提供可复现的离线评测框架，但仓库自带 Manifest 主要用于功能演示，不代表公开 Coding Agent Benchmark 的能力分数。
+- 可选 Embedding Tool 检索产生的第三方 API Token/费用尚未计入 Agent 的模型 Token 与美元预算统计。
 
 ## 测试
 

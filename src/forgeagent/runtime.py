@@ -89,6 +89,8 @@ class AgentRuntime:
             )
 
             for round_number in range(1, self.max_rounds + 1):
+                if self.catalog is not None:
+                    self.catalog.set_planning(self.mode is RunMode.PLANNING)
                 schemas = self.catalog.schemas() if self.catalog else self.registry.schemas()
                 prepared = self.context.prepare(
                     self._system_prompt(), self.active_messages, schemas
@@ -225,15 +227,17 @@ class AgentRuntime:
 
     def set_mode(self, mode: RunMode) -> None:
         self.mode = mode
+        if self.catalog is not None:
+            self.catalog.set_planning(mode is RunMode.PLANNING)
 
     def approve_plan(self) -> None:
-        self.mode = RunMode.NORMAL
+        self.set_mode(RunMode.NORMAL)
 
     def reset(self) -> None:
         with self._run_lock:
             self.transcript.clear()
             self.active_messages.clear()
-            self.mode = RunMode.NORMAL
+            self.set_mode(RunMode.NORMAL)
             self.memory.clear()
             self.skills.restore([])
 
@@ -256,7 +260,7 @@ class AgentRuntime:
         with self._run_lock:
             self.transcript = copy.deepcopy(state.transcript)
             self.active_messages = copy.deepcopy(state.active_messages)
-            self.mode = state.mode
+            self.set_mode(state.mode)
             if hasattr(self.provider, "total_usage"):
                 self.provider.total_usage = state.usage
             if self.checkpoints is not None:

@@ -15,7 +15,7 @@ from .filesystem import (
 )
 from .git import ApplyPatchTool, GitDiffTool, GitStatusTool
 from .process import RunChecksTool, ShellTool
-from .registry import ToolCatalog, ToolRegistry, install_catalog_tools
+from .registry import EmbeddingBackend, ToolCatalog, ToolRegistry, install_catalog_tools
 
 
 def build_builtin_tools(
@@ -39,6 +39,7 @@ def build_builtin_tools(
 
 __all__ = [
     "Access",
+    "EmbeddingBackend",
     "ResourceClaim",
     "Tool",
     "ToolCatalog",

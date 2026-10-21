@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-cost-usd", type=float)
     parser.add_argument("--input-price-per-million", type=float)
     parser.add_argument("--output-price-per-million", type=float)
+    parser.add_argument("--tool-embedding-model")
+    parser.add_argument("--tool-embedding-base-url")
     parser.add_argument(
         "--trace-content", action="store_true", help="include prompts/arguments in trace"
     )
@@ -138,6 +140,12 @@ def _settings_with_args(settings: Settings, args) -> Settings:
             args.output_price_per_million
             if args.output_price_per_million is not None
             else settings.output_price_per_million
+        ),
+        tool_embedding_model=(
+            args.tool_embedding_model or settings.tool_embedding_model
+        ),
+        tool_embedding_base_url=(
+            args.tool_embedding_base_url or settings.tool_embedding_base_url
         ),
     )
 

@@ -11,7 +11,7 @@ separate reasons to change:
 | `TaskMemory` | which goal, constraints, plan and decisions survive compaction |
 | `SkillRegistry` | which workflow instructions are discovered and activated |
 | `CostBudget` | whether the next model request fits the configured spend ceiling |
-| `ToolCatalog` | which discovered schemas are currently visible |
+| `ToolCatalog` | which schemas are visible and how hidden Tools are retrieved |
 | `ToolRegistry` | Tool identity, validation and execution |
 | `PolicyPipeline` | whether a proposed call is authorized |
 | `BatchScheduler` | which calls may overlap |
@@ -38,7 +38,7 @@ src/forgeagent/
 ├── session.py            # SQLite snapshots and legacy JSON loading
 ├── mcp.py                # MCP transports, clients and Tool proxies
 ├── workers.py            # foreground/background Sub-Agents
-├── providers/            # model transports and fallback routing
+├── providers/            # model/embedding transports and fallback routing
 └── tools/
     ├── base.py           # Tool contract and resource claims
     ├── registry.py       # registration and lazy schema catalog
@@ -97,6 +97,16 @@ Registration and exposure are different. `ToolRegistry` owns every executable
 Tool instance; `ToolCatalog` owns the active subset whose JSON Schemas are sent
 to the model. A hidden Tool cannot be executed by a hallucinated direct call.
 The two catalog Tools let the model search and activate a small working set.
+
+Catalog retrieval first applies static runtime availability: capability
+allowlists, Plan Mode effects, and whether a non-interactive run can authorize
+the Tool. Offline BM25 ranks the remaining Tool names, descriptions,
+capabilities, and effects. When an optional embedding backend is configured,
+cached description vectors add semantic recall and cosine scores are fused with
+BM25 before Top-K selection. A provider failure falls back to BM25. Embedding
+search declares network effect/capability because the query and Tool metadata
+leave the process. Activation only changes schema visibility; normal execution
+policy is still authoritative.
 
 Policy order is fixed by composition:
 
@@ -182,6 +192,7 @@ instead of crashing the parent.
 - Worktrees isolate Git changes, not processes or network access.
 - File checkpoints do not make shell, Docker, MCP, or network effects reversible.
 - The MCP client currently covers Tools only.
+- Optional Tool-search embedding usage is not included in model cost accounting.
 - Docker protects shell/MCP process execution; it does not sandbox the LLM API.
 - JSON token estimation is approximate; the hard budget intentionally keeps a
   safety margin.
