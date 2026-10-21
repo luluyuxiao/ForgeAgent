@@ -18,6 +18,42 @@ from typing import Any, ClassVar
 from .tools import Tool, ToolEffect
 
 _RESULT_LIMIT = 24_000
+SUBAGENT_PROFILES = ("research", "implement", "full")
+
+_RESEARCH_TOOLS = frozenset(
+    {
+        "now",
+        "read_file",
+        "find_files",
+        "search_text",
+        "git_status",
+        "git_diff",
+        "memory_update",
+        "load_skill",
+    }
+)
+_IMPLEMENT_TOOLS = _RESEARCH_TOOLS | frozenset(
+    {"write_file", "replace_text", "apply_patch", "run_checks"}
+)
+
+
+def subagent_tool_allowlist(
+    profile: str, parent: frozenset[str] | None = None
+) -> frozenset[str] | None:
+    """Return a profile allowlist narrowed by an optional parent allowlist."""
+    if profile == "research":
+        profile_tools: frozenset[str] | None = _RESEARCH_TOOLS
+    elif profile == "implement":
+        profile_tools = _IMPLEMENT_TOOLS
+    elif profile == "full":
+        profile_tools = None
+    else:
+        raise ValueError(f"unknown Sub-Agent profile: {profile}")
+    if parent is None:
+        return profile_tools
+    if profile_tools is None:
+        return parent
+    return parent & profile_tools
 
 
 @dataclass
@@ -35,6 +71,7 @@ class TaskRecord:
     isolation: str = "shared"
     workspace: str = ""
     branch: str = ""
+    profile: str = "research"
 
 
 @dataclass(frozen=True)
@@ -62,14 +99,17 @@ class SubAgentManager:
             if worktree_root
             else Path.home() / ".forgeagent" / "worktrees"
         )
-        parameters = inspect.signature(run_task).parameters.values()
-        self._passes_workspace = any(
+        parameters = tuple(inspect.signature(run_task).parameters.values())
+        accepts_varargs = any(
             item.kind is inspect.Parameter.VAR_POSITIONAL for item in parameters
-        ) or sum(
+        )
+        positional_count = sum(
             item.kind
             in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
             for item in parameters
-        ) >= 2
+        )
+        self._passes_workspace = accepts_varargs or positional_count >= 2
+        self._passes_profile = accepts_varargs or positional_count >= 3
         self._pool = ThreadPoolExecutor(
             max_workers=max(1, max_workers), thread_name_prefix="forge-subagent"
         )
@@ -78,14 +118,22 @@ class SubAgentManager:
         self._lock = threading.RLock()
 
     def submit(
-        self, task: str, *, background: bool, isolation: str = "shared"
+        self,
+        task: str,
+        *,
+        background: bool,
+        isolation: str = "shared",
+        profile: str = "research",
     ) -> TaskRecord:
         if isolation not in {"shared", "worktree"}:
             raise ValueError("isolation must be shared or worktree")
+        if profile not in SUBAGENT_PROFILES:
+            raise ValueError(f"profile must be one of: {', '.join(SUBAGENT_PROFILES)}")
         task_id = uuid.uuid4().hex[:12]
         record = TaskRecord(
             task_id=task_id,
             task=task,
+            profile=profile,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             isolation=isolation,
         )
@@ -134,11 +182,12 @@ class SubAgentManager:
             with self._lock:
                 record.workspace = str(child_workspace)
                 record.branch = branch
-            child_result = (
-                self.run_task(task, child_workspace)
-                if self._passes_workspace
-                else self.run_task(task)
-            )
+            if self._passes_profile:
+                child_result = self.run_task(task, child_workspace, record.profile)
+            elif self._passes_workspace:
+                child_result = self.run_task(task, child_workspace)
+            else:
+                child_result = self.run_task(task)
         except Exception as error:  # noqa: BLE001 - child failure must not crash parent
             with self._lock:
                 record.status = "failed"
@@ -208,7 +257,8 @@ class SubAgentTool(Tool):
         "Delegate an isolated reasoning task to a child Agent. Foreground returns the result; "
         "background returns a task id for later polling. isolation=worktree creates a retained "
         "Git branch and checkout from HEAD (uncommitted changes are excluded); it is never "
-        "merged automatically."
+        "merged automatically. profile=research is read-only, implement adds bounded file edits "
+        "and configured checks, and full inherits every parent-available Tool."
     )
     effect = ToolEffect.PROCESS
     capabilities = frozenset({"subagent", "process"})
@@ -219,6 +269,11 @@ class SubAgentTool(Tool):
             "task": {"type": "string"},
             "run_mode": {"type": "string", "enum": ["foreground", "background"]},
             "isolation": {"type": "string", "enum": ["shared", "worktree"]},
+            "profile": {
+                "type": "string",
+                "enum": list(SUBAGENT_PROFILES),
+                "default": "research",
+            },
         },
         "required": ["task"],
         "additionalProperties": False,
@@ -228,7 +283,11 @@ class SubAgentTool(Tool):
         self.manager = manager
 
     def execute(
-        self, task: str, run_mode: str = "foreground", isolation: str = "shared"
+        self,
+        task: str,
+        run_mode: str = "foreground",
+        isolation: str = "shared",
+        profile: str = "research",
     ) -> str:
         if not task.strip():
             return "Error: Sub-Agent task must not be empty"
@@ -236,10 +295,13 @@ class SubAgentTool(Tool):
             return "Error: run_mode must be foreground or background"
         if isolation not in {"shared", "worktree"}:
             return "Error: isolation must be shared or worktree"
+        if profile not in SUBAGENT_PROFILES:
+            return f"Error: profile must be one of: {', '.join(SUBAGENT_PROFILES)}"
         record = self.manager.submit(
             task,
             background=run_mode == "background",
             isolation=isolation,
+            profile=profile,
         )
         return json.dumps(asdict(record), ensure_ascii=False, indent=2)
 

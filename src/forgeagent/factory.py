@@ -22,7 +22,13 @@ from .runtime import AgentRuntime
 from .sandbox import DockerExecutor, LocalExecutor
 from .tools import ToolCatalog, ToolRegistry, build_builtin_tools, install_catalog_tools
 from .trace import JsonlTrace, NullTrace, TraceSink
-from .workers import ChildRunResult, SubAgentManager, SubAgentTool, TaskStatusTool
+from .workers import (
+    ChildRunResult,
+    SubAgentManager,
+    SubAgentTool,
+    TaskStatusTool,
+    subagent_tool_allowlist,
+)
 
 
 @dataclass
@@ -35,6 +41,7 @@ class RuntimeOptions:
     enable_mcp: bool = True
     trace_content: bool = False
     allowed_capabilities: frozenset[str] | None = None
+    allowed_tools: frozenset[str] | None = None
 
 
 @dataclass
@@ -50,6 +57,7 @@ class RuntimeBundle:
             self.mcp.close()
 
 
+# 传入参数
 def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle:
     workspace = options.workspace.expanduser().resolve()
     executor = _executor(settings)
@@ -62,9 +70,13 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
     )
     memory = TaskMemory()
     skills = SkillRegistry.discover(workspace)
-    registry = ToolRegistry(build_builtin_tools(workspace, executor=executor))
-    registry.register(MemoryUpdateTool(memory))
-    if skills:
+    builtin_tools = build_builtin_tools(workspace, executor=executor)
+    registry = ToolRegistry(
+        tool for tool in builtin_tools if _tool_allowed(tool.name, options.allowed_tools)
+    )
+    if _tool_allowed("memory_update", options.allowed_tools):
+        registry.register(MemoryUpdateTool(memory))
+    if skills and _tool_allowed("load_skill", options.allowed_tools):
         registry.register(LoadSkillTool(skills))
     core_names = set(registry.names())
     capability = CapabilityPolicy(options.allowed_capabilities)
@@ -75,7 +87,8 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
             allowed_capabilities=options.allowed_capabilities,
         )
         for tool in mcp_tools:
-            registry.register(tool)
+            if _tool_allowed(tool.name, options.allowed_tools):
+                registry.register(tool)
 
     permission = PermissionPolicy(
         options.ask_permission if options.interactive else None,
@@ -84,16 +97,17 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
     policies = PolicyPipeline([capability, PlanningPolicy(), permission])
 
     workers = None
-    if options.enable_subagents:
+    if options.enable_subagents and _tool_allowed("subagent", options.allowed_tools):
 
-        def run_child(task: str, child_workspace: Path) -> ChildRunResult:
+        def run_child(task: str, child_workspace: Path, profile: str) -> ChildRunResult:
             child_options = RuntimeOptions(
                 workspace=child_workspace,
                 interactive=False,
                 allow_all=options.allow_all,
                 enable_subagents=False,
-                enable_mcp=options.enable_mcp,
+                enable_mcp=options.enable_mcp and profile == "full",
                 allowed_capabilities=options.allowed_capabilities,
+                allowed_tools=subagent_tool_allowlist(profile, options.allowed_tools),
             )
             child = create_runtime(settings, child_options)
             try:
@@ -109,8 +123,10 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
 
         workers = SubAgentManager(run_child, workspace=workspace)
         registry.register(SubAgentTool(workers))
-        registry.register(TaskStatusTool(workers))
-        core_names.update({"subagent", "task_status"})
+        core_names.add("subagent")
+        if _tool_allowed("task_status", options.allowed_tools):
+            registry.register(TaskStatusTool(workers))
+            core_names.add("task_status")
 
     catalog = ToolCatalog(registry, active=core_names)
     install_catalog_tools(catalog)
@@ -222,3 +238,7 @@ def _executor(settings: Settings):
             network=settings.sandbox_network,
         )
     raise ValueError("FORGE_SANDBOX must be 'local' or 'docker'")
+
+
+def _tool_allowed(name: str, allowed: frozenset[str] | None) -> bool:
+    return allowed is None or name in allowed

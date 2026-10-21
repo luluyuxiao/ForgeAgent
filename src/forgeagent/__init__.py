@@ -1,6 +1,6 @@
 """ForgeAgent public library API."""
 
-from .checkpoints import CheckpointManager
+from .checkpoints import CheckpointError, CheckpointManager
 from .config import BudgetExceededError, CostBudget, ProviderRoute, Settings
 from .context import ContextLimitError, ContextWindow
 from .contracts import ChatProvider, ModelReply, ToolCall, Usage
@@ -29,6 +29,7 @@ __all__ = [
     "BudgetExceededError",
     "CapabilityPolicy",
     "ChatProvider",
+    "CheckpointError",
     "CheckpointManager",
     "ContextLimitError",
     "ContextWindow",

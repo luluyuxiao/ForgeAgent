@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from forgeagent.guidance import SkillRegistry
+
+PROJECT_ROOT = Path(__file__).parents[1]
 
 
 def _write_skill(root, name, description, body):
@@ -30,3 +34,17 @@ def test_project_skill_overrides_global_and_activation_is_restorable(tmp_path):
     assert "grants no Tool" in skills.render_active()
     skills.restore([])
     assert skills.active_names() == ()
+
+
+def test_bundled_quality_skill_and_resources_are_discoverable(tmp_path):
+    skills = SkillRegistry.discover(PROJECT_ROOT, global_dir=tmp_path / "global")
+
+    assert "forgeagent-quality" in skills.names()
+    loaded = skills.activate("forgeagent-quality")
+    assert loaded.scope == "project"
+    assert "scripts/run_quality_gate.py" in loaded.instructions
+
+    root = loaded.path.parent
+    assert (root / "scripts/run_quality_gate.py").is_file()
+    assert (root / "references/failure-triage.md").is_file()
+    assert (root / "assets/quality-report.md").is_file()

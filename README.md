@@ -28,12 +28,13 @@ not use non-public or leaked proprietary source code.
 - per-server MCP failure isolation, reconnect, circuit breaking and schema refresh;
 - legacy MCP initialization and modern stateless `2026-07-28` requests;
 - optional Docker isolation for stdio MCP servers;
-- foreground/background Sub-Agents with shared or retained Git worktree isolation;
+- foreground/background Sub-Agents with `research`, `implement`, and `full`
+  Tool profiles plus shared or retained Git worktree isolation;
 - full Transcript plus compact Active Context, Tool Result snipping, LLM summary,
   deterministic collapse and hard budget enforcement;
 - transactional SQLite Session save/resume with legacy JSON compatibility;
 - configurable runtime USD ceilings based on explicit input/output token prices;
-- file Checkpoint/Undo for `write_file` and `replace_text`;
+- file Checkpoint/Undo for recoverable writes, replacements, and patch application;
 - metadata-redacted JSONL traces plus a portable HTML trajectory viewer;
 - manifest-based Eval runner with output, Tool, file, verification, token and duration assertions.
 
@@ -71,6 +72,37 @@ CLI / library / Eval
 `transcript` is the append-only history used for audit and replay.
 `active_messages` is the bounded view sent to the model. Context compaction
 changes only the latter.
+
+## How a request runs
+
+```text
+User input
+  │
+  ├──► load AGENTS.md / instructions / active Skills / TaskMemory
+  ▼
+ContextWindow builds the token-bounded model context
+  ▼
+ChatProvider calls the primary model and may select an ordered fallback
+  ▼
+The model returns text or Tool Calls
+  ▼
+ToolCatalog / ToolRegistry resolve Tools and validate arguments
+  ▼
+PolicyPipeline: Capability → Plan Mode → Permission
+  ▼
+Hook → BatchScheduler → Checkpoint (recoverable file mutations only)
+  ▼
+built-in Tool / Docker / MCP server / Sub-Agent execution
+  ▼
+results update Transcript, Active Context, Trace, and token/cost accounting
+  └──► the model continues until a final answer or a runtime boundary
+```
+
+The separation is intentional: the model proposes an operation, policy decides
+whether it is authorized, and an executor performs it. Prompts, repository
+instructions, and Skills can guide behavior but cannot bypass policy, hooks, or
+the sandbox. Independent read-only Tools may overlap; conflicting resources and
+writes serialize.
 
 ## Install
 
@@ -225,11 +257,17 @@ Skills are discovered from `~/.forgeagent/skills/*/SKILL.md` and
 `.forgeagent/skills/*/SKILL.md`. Only their name and description are shown at
 startup; `load_skill` activates the full workflow instructions. Project Skills
 override same-named user Skills and neither can grant Tools or permissions.
+The checked-in `forgeagent-quality` project Skill demonstrates progressive
+disclosure with a reusable quality-gate script, an on-demand failure-triage
+reference, and a report template under `.forgeagent/skills/forgeagent-quality/`.
 
 Copy `examples/hooks.json` to `.forgeagent/hooks.json` to configure
 `PreToolUse` and `PostToolUse` commands. Hooks receive JSON on stdin and run
 through the selected local or Docker executor. Exit code 2 from a pre-hook
 blocks the Tool; hook failures never grant access or crash the Agent.
+The example protects credential files, rejects a few intentionally destructive
+shell patterns, records content-free Tool audit events, and runs lightweight
+post-change checks. The rules are demonstrations rather than a complete security policy.
 
 Runtime spend checks require explicit prices so fast-changing provider pricing
 is never hard-coded. The numbers below are illustrative; verify the current
@@ -338,15 +376,22 @@ prompts, elicitation, OAuth flows, or dynamic list-change subscriptions.
 
 ## Sub-Agents and background tasks
 
-The `subagent` Tool accepts `run_mode=foreground|background` and
-`isolation=shared|worktree`. Every child gets a
+The `subagent` Tool accepts `run_mode=foreground|background`,
+`isolation=shared|worktree`, and `profile=research|implement|full`. The default
+`research` profile exposes only read/search, Git inspection, memory and Skill
+loading Tools. `implement` additionally exposes bounded file editing and
+configured checks, but deliberately omits arbitrary `shell` and MCP Tools.
+`full` inherits every Tool available to the parent except recursive Sub-Agent
+delegation. Profile allowlists are intersected with any parent allowlist and
+still pass capability, permission, hook and sandbox enforcement; a profile can
+never grant authority its parent does not have. Every child gets a
 new `AgentRuntime`, Transcript, Active Context, provider instance and registry;
 the child registry intentionally omits `subagent`, preventing recursive
 delegation. Background calls return a task id, and `task_status` or `/tasks`
-reports state, result, failure and child token usage. Workers are bounded and
-process-local: task state does not survive CLI exit. Worktree mode creates a
-retained `forgeagent/agent-*` branch and checkout from `HEAD`, reports both
-paths, and never merges or deletes them automatically. Uncommitted parent
+reports profile, state, result, failure and child token usage. Workers are
+bounded and process-local: task state does not survive CLI exit. Worktree mode
+creates a retained `forgeagent/agent-*` branch and checkout from `HEAD`, reports
+both paths, and never merges or deletes them automatically. Uncommitted parent
 changes are intentionally not copied into the worktree.
 
 Child runs are intentionally non-interactive. Without `--yes`, their stateful
@@ -379,9 +424,12 @@ Legacy JSON Sessions remain readable, so resume is fast without destroying
 audit history.
 
 Before a recoverable file Tool executes, `CheckpointManager` stores original
-bytes (or records that the file did not exist). `/undo` restores the latest
-checkpoint. Arbitrary shell side effects and remote MCP effects cannot be
-reliably inferred and are deliberately not advertised as undoable.
+bytes (or records that the file did not exist). Successful calls record a
+post-execution digest, so `/undo` refuses to overwrite later user edits; failed
+calls are rolled back without consuming undo history. Snapshots are bounded to
+10 MiB per file and 100 MiB total by default. Arbitrary shell side effects and
+remote MCP effects cannot be reliably inferred and are deliberately not
+advertised as undoable.
 
 ## Trace and Eval
 
@@ -427,6 +475,29 @@ what an authorized process can actually reach. Prompt instructions are useful
 behavioral guidance, but neither a permission boundary nor a sandbox.
 Interactive “always” approval is session-only and scoped to the exact command,
 file path or call arguments rather than granting an entire Tool class.
+
+## Current boundaries
+
+- ForgeAgent currently uses exact file search, structured memory, and optional
+  MCP documentation Tools; it does not include a vector database or general RAG
+  pipeline.
+- The MCP client focuses on Tool discovery and calls. Resources, prompts,
+  elicitation, OAuth, and dynamic list-change subscriptions are not implemented.
+- Docker isolates shell commands, configured checks, hooks, and explicitly
+  configured stdio MCP servers. File and Git Tools run in the host process with
+  workspace path validation.
+- Checkpoints cover only recoverable mutations whose target files ForgeAgent
+  can determine. Arbitrary shell, HTTP/MCP, database, and other external side
+  effects are not guaranteed to be undoable.
+- Session resume restores conversation state, Active Context, memory, activated
+  Tools/Skills, and checkpoints, but not exited MCP processes, background
+  workers, temporary approvals, or child task state.
+- Worktree Sub-Agents do not copy uncommitted parent changes and do not merge or
+  clean up branches automatically. Shared-workspace callers must still avoid
+  concurrent edits to the same file.
+- The Eval runner provides a reproducible offline framework, while the bundled
+  manifest is a feature demonstration rather than a public coding-agent
+  benchmark score.
 
 ## Test
 

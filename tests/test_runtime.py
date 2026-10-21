@@ -149,3 +149,54 @@ def test_runtime_checkpoints_a_multi_file_patch_and_undoes_it(tmp_path):
     assert target.read_text(encoding="utf-8") == "after\n"
     assert "restored proof.txt" in runtime.undo()
     assert target.read_text(encoding="utf-8") == "before\n"
+
+
+def test_runtime_discards_checkpoint_when_a_file_tool_fails(tmp_path):
+    target = tmp_path / "proof.txt"
+    target.write_text("before", encoding="utf-8")
+    runtime = _runtime(
+        tmp_path,
+        [
+            ModelReply(
+                tool_calls=[
+                    ToolCall(
+                        "c1",
+                        "replace_text",
+                        {"path": "proof.txt", "old": "missing", "new": "after"},
+                    )
+                ]
+            ),
+            ModelReply(content="done"),
+        ],
+    )
+    runtime.checkpoints = CheckpointManager(tmp_path)
+
+    assert runtime.run("replace missing text") == "done"
+    assert runtime.checkpoints.depth == 0
+    assert runtime.undo() == "Nothing to undo."
+    assert target.read_text(encoding="utf-8") == "before"
+
+
+def test_runtime_blocks_mutation_when_checkpoint_is_too_large(tmp_path):
+    target = tmp_path / "proof.txt"
+    target.write_text("before", encoding="utf-8")
+    runtime = _runtime(
+        tmp_path,
+        [
+            ModelReply(
+                tool_calls=[
+                    ToolCall("c1", "write_file", {"path": "proof.txt", "content": "after"})
+                ]
+            ),
+            ModelReply(content="done"),
+        ],
+    )
+    runtime.checkpoints = CheckpointManager(tmp_path, max_file_bytes=3)
+
+    assert runtime.run("replace proof") == "done"
+    observation = next(
+        message for message in runtime.transcript if message.get("role") == "tool"
+    )
+    assert "checkpoint capture failed" in observation["content"]
+    assert target.read_text(encoding="utf-8") == "before"
+    assert runtime.checkpoints.depth == 0

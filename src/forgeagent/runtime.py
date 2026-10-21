@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from .checkpoints import CheckpointManager
+from .checkpoints import CheckpointError, CheckpointManager
 from .config import BudgetExceededError, CostBudget
 from .context import ContextWindow
 from .contracts import ChatProvider, EventCallback, Message, TokenCallback, ToolCall, Usage
@@ -354,7 +354,17 @@ class AgentRuntime:
         if self.checkpoints is None:
             return None
         tool = self.registry.require(call.name)
-        checkpoint = self.checkpoints.capture(call, tool)
+        try:
+            checkpoint = self.checkpoints.begin(call, tool)
+        except (CheckpointError, OSError, ValueError) as error:
+            self.trace.emit(
+                "checkpoint_failed",
+                {"call_id": call.id, "tool": call.name, "error": str(error)},
+            )
+            return (
+                f"Error: checkpoint capture failed for {call.name}; "
+                f"Tool was not executed: {error}"
+            )
         if checkpoint is not None:
             self.trace.emit(
                 "checkpoint_created",
@@ -365,7 +375,17 @@ class AgentRuntime:
     def _after_execute(self, call: ToolCall, result: str) -> None:
         if self.hooks is not None:
             self.hooks.run_post(call.name, call.arguments, result)
-        if result.lstrip().lower().startswith("error") or result.startswith("Blocked by hook"):
+        failed = result.lstrip().lower().startswith("error") or result.startswith(
+            "Blocked by hook"
+        )
+        if self.checkpoints is not None:
+            status = self.checkpoints.complete(call.id, succeeded=not failed)
+            if status is not None:
+                self.trace.emit(
+                    "checkpoint_finalized",
+                    {"call_id": call.id, "tool": call.name, "status": status},
+                )
+        if failed:
             return
         tool = self.registry.require(call.name)
         for path in tool.checkpoint_paths(call.arguments):

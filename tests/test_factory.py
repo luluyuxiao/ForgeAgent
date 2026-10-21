@@ -5,6 +5,7 @@ import json
 from forgeagent.config import Settings
 from forgeagent.factory import RuntimeOptions, create_runtime
 from forgeagent.sandbox import DockerExecutor
+from forgeagent.workers import subagent_tool_allowlist
 
 
 def test_factory_composes_docker_catalog_checkpoint_and_trace(tmp_path):
@@ -65,3 +66,42 @@ def test_factory_rejects_mcp_server_before_network_when_capability_is_missing(tm
         assert "network" in bundle.mcp.errors[0]["error"]
     finally:
         bundle.close()
+
+
+def test_factory_filters_child_runtime_tools_by_profile(tmp_path):
+    settings = Settings(
+        api_key="test-key",
+        model="fake-model",
+        base_url="https://example.test/v1",
+        llm_summary=False,
+    )
+
+    research = create_runtime(
+        settings,
+        RuntimeOptions(
+            workspace=tmp_path,
+            enable_subagents=False,
+            enable_mcp=False,
+            allowed_tools=subagent_tool_allowlist("research"),
+        ),
+    )
+    implement = create_runtime(
+        settings,
+        RuntimeOptions(
+            workspace=tmp_path,
+            enable_subagents=False,
+            enable_mcp=False,
+            allowed_tools=subagent_tool_allowlist("implement"),
+        ),
+    )
+    try:
+        assert research.runtime.registry.get("read_file") is not None
+        assert research.runtime.registry.get("write_file") is None
+        assert research.runtime.registry.get("shell") is None
+        assert implement.runtime.registry.get("write_file") is not None
+        assert implement.runtime.registry.get("run_checks") is not None
+        assert implement.runtime.registry.get("shell") is None
+        assert implement.runtime.registry.get("subagent") is None
+    finally:
+        research.close()
+        implement.close()

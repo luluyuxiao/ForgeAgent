@@ -3,12 +3,40 @@
     {
       "matcher": "write_*",
       "command": "python examples/hook_guard.py"
+    },
+    {
+      "matcher": "replace_text",
+      "command": "python examples/hook_guard.py"
+    },
+    {
+      "matcher": "apply_patch",
+      "command": "python examples/hook_guard.py"
+    },
+    {
+      "matcher": "shell",
+      "command": "python examples/hook_guard.py"
     }
   ],
   "PostToolUse": [
     {
+      "matcher": "*",
+      "command": "python examples/hook_audit.py"
+    },
+    {
       "matcher": "apply_patch",
-      "command": "python -m compileall -q src"
+      "command": "python -m compileall -q src tests examples"
+    },
+    {
+      "matcher": "write_file",
+      "command": "python -m compileall -q src tests examples"
+    },
+    {
+      "matcher": "replace_text",
+      "command": "python -m compileall -q src tests examples"
+    },
+    {
+      "matcher": "run_checks",
+      "command": "git diff --check"
     }
   ]
 }

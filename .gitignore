@@ -7,6 +7,9 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
-.forgeagent/
+.forgeagent/*
+!.forgeagent/skills/
+!.forgeagent/skills/**
+.forgeagent/skills/**/__pycache__/
+.forgeagent/skills/**/*.py[cod]
 .DS_Store
-

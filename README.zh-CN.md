@@ -23,7 +23,7 @@ ForgeAgent 是一个紧凑、由策略驱动的 Coding Agent / Agent Harness。�
 - MCP Server 级故障隔离、重连、熔断和 Schema 刷新；
 - 兼容传统 MCP 初始化流程和现代无状态 `2026-07-28` 请求；
 - 可选使用 Docker 隔离 stdio MCP Server；
-- 前台/后台 Sub-Agent，以及共享目录或保留 Git Worktree 两种隔离方式；
+- 前台/后台 Sub-Agent，支持 `research`、`implement`、`full` 三种工具 Profile，以及共享目录或保留 Git Worktree 两种隔离方式；
 - 完整 Transcript 与精简 Active Context、Tool Result 裁剪、LLM 摘要、确定性折叠和硬预算限制；
 - 事务化 SQLite Session，兼容读取旧版 JSON Session；
 - 基于显式输入/输出 Token 价格的运行时美元预算上限；
@@ -63,6 +63,33 @@ CLI / library / Eval
 ```
 
 `transcript` 是用于审计和回放的只追加历史记录；`active_messages` 是发送给模型、受预算限制的上下文视图。上下文压缩只会改变后者。
+
+## 一次请求如何运行
+
+```text
+用户输入
+  │
+  ├──► 加载 AGENTS.md / instructions / 已激活 Skill / TaskMemory
+  ▼
+ContextWindow 组装受 Token 预算约束的模型上下文
+  ▼
+ChatProvider 调用主模型，必要时切换备用 Provider
+  ▼
+模型返回文本或 Tool Call
+  ▼
+ToolCatalog / ToolRegistry 查找并校验 Tool 参数
+  ▼
+PolicyPipeline：Capability → Plan Mode → Permission
+  ▼
+Hook → BatchScheduler → Checkpoint（仅可恢复文件修改）
+  ▼
+内置 Tool / Docker / MCP Server / Sub-Agent 执行
+  ▼
+结果写入 Transcript、Active Context、Trace 和 Token/成本统计
+  └──► 模型继续推理，直到给出最终回答或到达运行边界
+```
+
+这条链路刻意把“模型提出操作”“策略授权操作”和“执行器真正完成操作”分开：Prompt、仓库指令和 Skill 只能指导模型，不能跳过 Policy、Hook 或 Sandbox。独立且资源不冲突的读取型 Tool 可以并行；写入或资源冲突的 Tool 会串行执行。
 
 ## 安装
 
@@ -186,8 +213,10 @@ Git 相关 Tool 包括 `git_status`、`git_diff` 和 `apply_patch`。补丁会�
 结构化任务记忆独立于可以被压缩的聊天历史，并在每次请求中重新注入。模型可以通过 `memory_update` 维护有大小限制的目标、约束、计划、决策和修改文件列表；用户也可以使用 `/memory`、`/goal`、`/constraint` 和 `/decision` 查看或更新它们。该状态会随 Session 保存，但其中的约束只是语义指导，不是授权边界。
 
 ForgeAgent 会从 `~/.forgeagent/skills/*/SKILL.md` 和 `.forgeagent/skills/*/SKILL.md` 发现 Skill。启动时只展示名称和描述，模型调用 `load_skill` 后才会把完整工作流指令加入上下文。项目 Skill 会覆盖同名用户 Skill，任何 Skill 都不能授予 Tool 或权限。
+仓库内置的 `forgeagent-quality` 项目 Skill 展示了渐进式加载：主说明按需引用可复用的质量检查脚本、失败分类参考文档和报告模板，文件位于 `.forgeagent/skills/forgeagent-quality/`。
 
 把 `examples/hooks.json` 复制到 `.forgeagent/hooks.json` 即可配置 `PreToolUse` 和 `PostToolUse` 命令。Hook 通过标准输入接收 JSON，并使用当前选择的本地或 Docker Executor。前置 Hook 只有以状态码 2 退出时才会阻止 Tool；Hook 失败不会授予权限，也不会让 Agent 崩溃。
+示例会保护凭据文件、拦截几类明显危险的 Shell 命令、记录不含参数内容的 Tool 审计事件，并在代码修改后运行轻量检查；这些规则用于展示 Hook 能力，并不是完整的安全策略。
 
 运行时成本限制要求显式配置价格，ForgeAgent 不会硬编码快速变化的服务商价格。以下数字仅用于演示，请先确认所用路由的最新价格：
 
@@ -257,7 +286,7 @@ HTTP 默认使用现代无状态 `2026-07-28` 生命周期；stdio 默认使用�
 
 ## Sub-Agent 与后台任务
 
-`subagent` Tool 接受 `run_mode=foreground|background` 和 `isolation=shared|worktree`。每个子 Agent 都拥有新的 `AgentRuntime`、Transcript、Active Context、Provider 实例和 Registry。子 Agent 的 Registry 会有意移除 `subagent`，防止递归委派。后台调用会立即返回任务 ID，随后可以通过 `task_status` 或 `/tasks` 查看状态、结果、错误和子 Agent Token 用量。Worker 数量有上限且仅存在于当前进程中，CLI 退出后任务状态不会保留。Worktree 模式会从当前 `HEAD` 创建并保留 `forgeagent/agent-*` 分支和独立检出目录，返回路径供用户检查，但不会自动合并或删除；父工作区中未提交的改动不会被复制。
+`subagent` Tool 接受 `run_mode=foreground|background`、`isolation=shared|worktree` 和 `profile=research|implement|full`。默认的 `research` 只暴露读取、搜索、Git 检查、Memory 与 Skill 加载 Tool；`implement` 额外暴露受工作区与 Checkpoint 约束的文件修改和配置化检查，但明确排除任意 `shell` 与 MCP Tool；`full` 继承父 Agent 可用的全部 Tool，但仍禁止递归委派。Profile 白名单会与父级白名单取交集，并继续经过 Capability、Permission、Hook 和 Sandbox 控制，因此不能获得父 Agent 本身没有的权限。每个子 Agent 都拥有新的 `AgentRuntime`、Transcript、Active Context、Provider 实例和 Registry。子 Agent 的 Registry 会有意移除 `subagent`，防止递归委派。后台调用会立即返回任务 ID，随后可以通过 `task_status` 或 `/tasks` 查看 Profile、状态、结果、错误和子 Agent Token 用量。Worker 数量有上限且仅存在于当前进程中，CLI 退出后任务状态不会保留。Worktree 模式会从当前 `HEAD` 创建并保留 `forgeagent/agent-*` 分支和独立检出目录，返回路径供用户检查，但不会自动合并或删除；父工作区中未提交的改动不会被复制。
 
 子 Agent 以非交互方式运行。未指定 `--yes` 时，它们的有状态 Tool 会采用 fail-closed 策略，而不会尝试从 Worker 线程读取第二个终端权限提示。
 
@@ -274,7 +303,7 @@ HTTP 默认使用现代无状态 `2026-07-28` 生命周期；stdio 默认使用�
 
 最新的协议消息块会被保留。如果摘要失败，则退回确定性折叠。Session 会在事务化 SQLite 数据库中分别保存完整 Transcript 和已经压缩的 Active Context，同时保存结构化记忆、已激活 Skill、Catalog 状态和检查点。旧版 JSON Session 仍可读取，因此恢复速度快，同时不会破坏审计历史。
 
-在执行可恢复的文件 Tool 前，`CheckpointManager` 会保存原始字节，或者记录文件此前不存在。`/undo` 可以恢复最近一次检查点。任意 Shell 命令和远程 MCP 调用的副作用无法被可靠推断，因此不会被标记为可撤销。
+在执行可恢复的文件 Tool 前，`CheckpointManager` 会保存原始字节，或者记录文件此前不存在。成功调用会记录执行后的摘要，因此 `/undo` 不会覆盖用户后续修改；失败调用会自动回滚且不占用撤销历史。默认单文件快照上限为 10 MiB，总快照上限为 100 MiB。任意 Shell 命令和远程 MCP 调用的副作用无法被可靠推断，因此不会被标记为可撤销。
 
 ## Trace 与 Eval
 
@@ -307,6 +336,16 @@ Eval 默认不允许交互，并拒绝修改型 Tool。只有信任 Manifest 时
 `/plan` 只允许副作用为 `PURE` 和 `READ` 的 Tool。`memory_update` 等内部 `STATE` 修改在普通模式下不需要外部变更授权，但在 Plan Mode 中仍会被拒绝。`/approve` 会恢复普通 ReAct 执行；Plan Mode 并不是独立的 Planner/Executor 图。Permission 决定模型提出的操作是否获得授权，Docker 决定已授权进程实际能够访问什么。Prompt 指令可以指导行为，但既不是权限边界，也不是沙箱。
 
 交互模式中的“始终允许”只在当前 Session 有效，并且会限定到完全相同的命令、文件路径或调用参数，而不是授权整个 Tool 类别。
+
+## 当前边界
+
+- ForgeAgent 当前采用精确文件搜索、结构化记忆和可选 MCP 文档工具，没有内置向量数据库或通用 RAG 流水线；
+- MCP 客户端目前聚焦 Tool 发现和调用，尚不支持 Resources、Prompts、Elicitation、OAuth 与动态列表变更订阅；
+- Docker 隔离的是 Shell、项目检查、Hook 以及显式配置的 stdio MCP Server；文件和 Git Tool 仍在宿主进程中运行，但会执行工作区路径校验；
+- Checkpoint 只覆盖 ForgeAgent 能确定目标文件的可恢复修改。任意 Shell、HTTP/MCP、数据库或其他外部副作用不保证可撤销；
+- Session 会恢复对话、Active Context、记忆、已激活 Tool/Skill 和检查点，但不会恢复已经退出的 MCP 子进程、后台 Worker、临时权限授权或子 Agent 任务；
+- Worktree 子 Agent 不会复制父工作区的未提交修改，也不会自动合并或清理分支；共享工作区模式仍需要调用者避免并发修改同一文件；
+- Eval Runner 已提供可复现的离线评测框架，但仓库自带 Manifest 主要用于功能演示，不代表公开 Coding Agent Benchmark 的能力分数。
 
 ## 测试
 
