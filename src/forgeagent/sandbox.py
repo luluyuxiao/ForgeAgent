@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .workspace_snapshot import temporary_workspace, workspace_changes, workspace_manifest
+from .workspace_snapshot import (
+    SandboxChangeStore,
+    capture_workspace_patch,
+    fingerprint_path,
+    temporary_workspace,
+    workspace_changes,
+    workspace_manifest,
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +26,8 @@ class CommandResult:
     stderr: str
     workspace_mode: str = "direct"
     workspace_changes: tuple[str, ...] = ()
+    change_set_id: str = ""
+    change_set_error: str = ""
 
 
 class CommandExecutor(Protocol):
@@ -77,6 +87,18 @@ class DockerExecutor:
         self.tmpfs_size = tmpfs_size
         self.workspace_mode = workspace_mode
         self._runner = runner
+        self._change_stores: dict[Path, SandboxChangeStore] = {}
+        self._store_lock = threading.RLock()
+
+    def change_store(self, workspace: Path) -> SandboxChangeStore:
+        """Return the process-local pending-change store for one real workspace."""
+        root = workspace.expanduser().resolve()
+        with self._store_lock:
+            store = self._change_stores.get(root)
+            if store is None:
+                store = SandboxChangeStore(root)
+                self._change_stores[root] = store
+            return store
 
     def command(self, shell_command: str, workspace: Path) -> list[str]:
         user = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "65532:65532"
@@ -129,13 +151,49 @@ class DockerExecutor:
         try:
             with temporary_workspace(cwd) as (workspace, before):
                 completed = self._run(command, workspace, timeout, stdin)
-                changes = workspace_changes(before, workspace_manifest(workspace))
+                after = workspace_manifest(workspace)
+                changes = workspace_changes(before, after)
+                change_set_id = ""
+                change_set_error = ""
+                if completed.returncode == 0 and changes:
+                    try:
+                        patch, paths = capture_workspace_patch(workspace)
+                        if patch and paths:
+                            unsupported = tuple(
+                                path
+                                for path in paths
+                                if before.get(path, ("missing", 0, "", 0))[0]
+                                not in {"file", "missing"}
+                                or fingerprint_path(workspace / path)[0]
+                                not in {"file", "missing"}
+                            )
+                            if unsupported:
+                                raise ValueError(
+                                    "sandbox change sets support only regular files; "
+                                    "unsupported paths: " + ", ".join(unsupported)
+                                )
+                            item = self.change_store(cwd).add(
+                                patch=patch,
+                                paths=paths,
+                                summary=changes,
+                                baseline=before,
+                            )
+                            change_set_id = item.change_set_id
+                    except (
+                        OSError,
+                        subprocess.SubprocessError,
+                        RuntimeError,
+                        ValueError,
+                    ) as error:
+                        change_set_error = f"{type(error).__name__}: {error}"
                 return CommandResult(
                     completed.returncode,
                     completed.stdout,
                     completed.stderr,
                     workspace_mode="isolated",
                     workspace_changes=changes,
+                    change_set_id=change_set_id,
+                    change_set_error=change_set_error,
                 )
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError(f"cannot prepare isolated workspace: {error}") from error

@@ -26,10 +26,13 @@ from .providers import (
 from .runtime import AgentRuntime
 from .sandbox import DockerExecutor, LocalExecutor
 from .tools import (
+    ApplySandboxChangesTool,
     ReadTranscriptRangeTool,
+    ReviewSandboxChangesTool,
     SearchTranscriptTool,
     ToolCatalog,
     ToolRegistry,
+    Workspace,
     build_builtin_tools,
     install_catalog_tools,
 )
@@ -99,6 +102,17 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
         registry.register(MemoryUpdateTool(memory))
     if skills and _tool_allowed("load_skill", options.allowed_tools):
         registry.register(LoadSkillTool(skills))
+    if isinstance(executor, DockerExecutor) and executor.workspace_mode == "isolated":
+        change_store = executor.change_store(workspace)
+        if _tool_allowed("review_sandbox_changes", options.allowed_tools):
+            registry.register(ReviewSandboxChangesTool(change_store))
+        if _tool_allowed("apply_sandbox_changes", options.allowed_tools):
+            registry.register(
+                ApplySandboxChangesTool(
+                    Workspace(workspace),
+                    change_store,
+                )
+            )
     core_names = set(registry.names())
     capability = CapabilityPolicy(options.allowed_capabilities)
     mcp_connections = None

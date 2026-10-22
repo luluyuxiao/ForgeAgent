@@ -15,7 +15,7 @@ class RunChecksTool(Tool):
     name = "run_checks"
     description = (
         "Run trusted lint/test commands declared in .forgeagent.json and return all exit "
-        "codes. Docker isolated mode discards command-generated workspace changes."
+        "codes. Successful Docker-isolated changes are retained as reviewable change sets."
     )
     effect = ToolEffect.PROCESS
     capabilities = frozenset({"process", "filesystem_read", "filesystem_write", "network"})
@@ -69,6 +69,8 @@ class RunChecksTool(Tool):
                     "stderr": completed.stderr[-8000:],
                     "workspace_mode": completed.workspace_mode,
                     "workspace_changes": list(completed.workspace_changes),
+                    "change_set_id": completed.change_set_id or None,
+                    "change_set_error": completed.change_set_error or None,
                 }
             )
             if completed.returncode != 0:
@@ -86,7 +88,8 @@ class ShellTool(Tool):
     name = "shell"
     description = (
         "Run a non-interactive shell command using the configured execution backend. "
-        "Docker isolated mode discards workspace changes; use file Tools for persistent edits."
+        "Successful Docker-isolated changes require review_sandbox_changes followed by "
+        "policy-approved apply_sandbox_changes before they persist."
     )
     effect = ToolEffect.PROCESS
     capabilities = frozenset({"process", "filesystem_read", "filesystem_write", "network"})
@@ -132,9 +135,20 @@ class ShellTool(Tool):
                 else "[none]"
             )
             + (
-                "\n[isolated workspace changes were discarded]"
-                if completed.workspace_mode == "isolated"
-                else ""
+                f"\npending_change_set={completed.change_set_id}"
+                "\n[isolated workspace was discarded; review and explicitly apply this "
+                "change set to persist it]"
+                if completed.change_set_id
+                else (
+                    f"\nchange_set_error={completed.change_set_error}"
+                    "\n[isolated workspace changes were discarded and could not be retained]"
+                    if completed.change_set_error
+                    else (
+                        "\n[isolated workspace changes were discarded]"
+                        if completed.workspace_mode == "isolated"
+                        else ""
+                    )
+                )
             )
         )
         return bound_output(rendered)

@@ -34,6 +34,8 @@ def test_factory_composes_docker_catalog_checkpoint_and_trace(tmp_path):
         assert bundle.runtime.registry.get("memory_update") is not None
         assert bundle.runtime.registry.get("search_transcript") is not None
         assert bundle.runtime.registry.get("read_transcript_range") is not None
+        assert bundle.runtime.registry.get("review_sandbox_changes") is not None
+        assert bundle.runtime.registry.get("apply_sandbox_changes") is not None
         assert bundle.runtime.hooks is not None
         assert bundle.runtime.budget.max_usd == 0
     finally:
@@ -141,6 +143,8 @@ def test_factory_filters_child_runtime_tools_by_profile(tmp_path):
         assert research.runtime.registry.get("shell") is None
         assert implement.runtime.registry.get("write_file") is not None
         assert implement.runtime.registry.get("run_checks") is not None
+        assert implement.runtime.registry.get("review_sandbox_changes") is None
+        assert implement.runtime.registry.get("apply_sandbox_changes") is None
         assert implement.runtime.registry.get("shell") is None
         assert implement.runtime.registry.get("subagent") is None
     finally:

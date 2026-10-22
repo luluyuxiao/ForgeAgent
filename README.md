@@ -20,8 +20,8 @@ not use non-public or leaked proprietary source code.
 - Permission, Plan Mode and per-Tool capability policies;
 - effect/resource-aware scheduling: independent reads overlap, writes serialize;
 - workspace-confined file tools plus local or hardened Docker shell execution;
-- disposable Docker workspace snapshots with bounded change reports and an explicit
-  direct-write escape hatch;
+- disposable Docker workspace snapshots with reviewable change sets, conflict-checked
+  policy-approved application, and an explicit direct-write escape hatch;
 - Git status/diff and checked multi-file patch application with file checkpoints;
 - repository instructions from `AGENTS.md` plus scoped-instruction discovery;
 - bounded structured memory for goals, constraints, plans, decisions and changed files;
@@ -346,11 +346,19 @@ The command uses a read-only root filesystem, dropped Linux capabilities,
 `no-new-privileges`, PID/CPU/memory limits, a bounded `/tmp`, a non-root UID,
 and `--network none` by default. It also defaults to
 `--sandbox-workspace isolated`: tracked and non-ignored project files are copied
-to a temporary snapshot, that snapshot is mounted read/write, and all Shell,
-check and Hook mutations are reported and discarded after the command. The real
-workspace is never mounted into that container. Use `--sandbox-workspace direct`
-only when an explicitly approved command must mutate the real workspace; normal
-source edits should use checkpoint-aware file Tools. Docker failure is
+to a temporary snapshot, and that snapshot alone is mounted read/write. The real
+workspace is never mounted into that container. After a successful command,
+ForgeAgent discards the snapshot but retains its Git patch as a bounded,
+process-local change set. The Agent can inspect it with
+`review_sandbox_changes`; persisting it requires a separate
+`apply_sandbox_changes` call, which passes normal write permission, verifies that
+creates a pending file checkpoint, verifies that every affected real file still
+matches the original snapshot, checks the patch, and only then applies it.
+Conflicts fail closed and
+`/undo` can restore a successfully applied change set. Pending change sets expire
+when the process exits and are not stored in Sessions. Use
+`--sandbox-workspace direct` only when an explicitly approved command must mutate
+the real workspace immediately. Docker failure is
 fail-closed and never falls back to host shell. Use `--sandbox-network bridge`
 only when the task really needs network access.
 
@@ -535,8 +543,9 @@ file path or call arguments rather than granting an entire Tool class.
 - The MCP client focuses on Tool discovery and calls. Resources, prompts,
   elicitation, OAuth, and dynamic list-change subscriptions are not implemented.
 - Docker isolates shell commands, configured checks, hooks, and explicitly
-  configured stdio MCP servers. File and Git Tools run in the host process with
-  workspace path validation.
+  configured stdio MCP servers. Isolated command changes persist only through a
+  separate policy-approved, conflict-checked, checkpointed host-side Tool. Other
+  file and Git Tools run in the host process with workspace path validation.
 - Checkpoints cover only recoverable mutations whose target files ForgeAgent
   can determine. Arbitrary shell, HTTP/MCP, database, and other external side
   effects are not guaranteed to be undoable.

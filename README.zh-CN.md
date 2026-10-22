@@ -14,7 +14,7 @@ ForgeAgent 是一个紧凑、由策略驱动的 Coding Agent / Agent Harness。�
 - Permission、Plan Mode 与按 Tool 能力划分的策略；
 - 感知副作用和资源的调度：独立读取可并发，写入操作串行执行；
 - 限制在工作区内的文件工具，以及本地或强化 Docker Shell 执行；
-- Docker 临时工作区快照、有界变更报告，以及需要显式开启的直接写入模式；
+- Docker 临时工作区快照、可审查 Change Set、经权限与冲突检查的安全应用，以及需要显式开启的直接写入模式；
 - Git 状态、差异查看，以及带检查和文件检查点的多文件补丁应用；
 - 从 `AGENTS.md` 加载仓库指令，并支持发现目录级作用域指令；
 - 有大小限制的结构化任务记忆，保存目标、约束、计划、决策和修改文件；
@@ -270,7 +270,9 @@ docker build -f Dockerfile.sandbox -t forgeagent-sandbox:latest .
 forgeagent --sandbox docker --sandbox-image forgeagent-sandbox:latest
 ```
 
-该命令默认使用只读根文件系统、移除 Linux Capabilities、启用 `no-new-privileges`、限制 PID/CPU/内存、提供受限的 `/tmp`、使用非 root UID，并设置 `--network none`。同时默认启用 `--sandbox-workspace isolated`：ForgeAgent 把 Git 已跟踪及未忽略的项目文件复制到临时快照，只把快照以读写方式挂载给 Shell、检查命令和 Hook；命令结束后报告并丢弃快照中的新增、修改与删除，真实工作区不会挂载进该容器。只有明确批准的命令必须直接修改项目时，才应使用 `--sandbox-workspace direct`；普通源码修改应继续使用支持 Checkpoint 的文件 Tool。Docker 执行失败时采用 fail-closed，绝不会退回宿主机 Shell。只有任务确实需要网络时才应使用 `--sandbox-network bridge`。
+该命令默认使用只读根文件系统、移除 Linux Capabilities、启用 `no-new-privileges`、限制 PID/CPU/内存、提供受限的 `/tmp`、使用非 root UID，并设置 `--network none`。同时默认启用 `--sandbox-workspace isolated`：ForgeAgent 把 Git 已跟踪及未忽略的项目文件复制到临时快照，只把快照以读写方式挂载给 Shell、检查命令和 Hook，真实工作区不会挂载进容器。命令成功后临时目录仍会被删除，但其中可应用的 Git Patch 会以有界、进程内 Change Set 的形式暂存。Agent 可先用 `review_sandbox_changes` 查看摘要与 Patch；要真正落盘，必须另行调用 `apply_sandbox_changes`：先经过普通写权限审批并创建待提交的文件 Checkpoint，再执行真实文件快照指纹冲突检测与 `git apply --check`，全部通过后才应用，成功后也可用 `/undo` 撤销。检测到用户或其他进程在快照后改过相关文件时会 fail-closed，绝不覆盖。待应用 Change Set 不写入 Session，进程退出后失效。
+
+只有明确批准的命令必须立即修改项目时，才应使用 `--sandbox-workspace direct`。Docker 执行失败时采用 fail-closed，绝不会退回宿主机 Shell。只有任务确实需要网络时才应使用 `--sandbox-network bridge`。
 
 Local 模式只是执行后端，不是文件系统沙箱：把 `cwd` 设为工作区并不能阻止绝对路径或 `..` 访问。运行不可信命令时应选择 Docker isolated 模式。`.venv`、`node_modules` 等被忽略的依赖不会复制进临时快照；需要这些依赖时应预装在沙箱镜像中。
 
@@ -361,7 +363,7 @@ Eval 默认不允许交互，并拒绝修改型 Tool。只有信任 Manifest 时
 
 - ForgeAgent 当前采用精确文件搜索、结构化记忆和可选 MCP 文档工具，没有内置向量数据库或通用 RAG 流水线；
 - MCP 客户端目前聚焦 Tool 发现和调用，尚不支持 Resources、Prompts、Elicitation、OAuth 与动态列表变更订阅；
-- Docker 隔离的是 Shell、项目检查、Hook 以及显式配置的 stdio MCP Server；默认 isolated 快照会丢弃其中的工作区修改，direct 模式才会读写真实项目；文件和 Git Tool 仍在宿主进程中运行，但会执行工作区路径校验；
+- Docker 隔离的是 Shell、项目检查、Hook 以及显式配置的 stdio MCP Server；isolated 快照不会直接写真实项目，其中的改动只有通过单独的权限审批、冲突检测和 Checkpoint Tool 才能落盘，direct 模式则会立即读写真实项目；其他文件和 Git Tool 仍在宿主进程中运行，但会执行工作区路径校验；
 - Checkpoint 只覆盖 ForgeAgent 能确定目标文件的可恢复修改。任意 Shell、HTTP/MCP、数据库或其他外部副作用不保证可撤销；
 - Session 会恢复对话、Active Context、记忆、已激活 Tool/Skill 和检查点，但不会恢复已经退出的 MCP 子进程、后台 Worker、临时权限授权或子 Agent 任务；
 - Worktree 子 Agent 不会复制父工作区的未提交修改，也不会自动合并或清理分支；共享工作区模式仍需要调用者避免并发修改同一文件；

@@ -35,7 +35,14 @@ _RESEARCH_TOOLS = frozenset(
     }
 )
 _IMPLEMENT_TOOLS = _RESEARCH_TOOLS | frozenset(
-    {"write_file", "replace_text", "apply_patch", "run_checks"}
+    {
+        "write_file",
+        "replace_text",
+        "apply_patch",
+        "run_checks",
+        "review_sandbox_changes",
+        "apply_sandbox_changes",
+    }
 )
 
 

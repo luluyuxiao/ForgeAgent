@@ -24,8 +24,10 @@ from .runtime import AgentRuntime
 from .sandbox import DockerExecutor, LocalExecutor
 from .session import SessionState, SessionStore
 from .tools import (
+    ApplySandboxChangesTool,
     EmbeddingBackend,
     ReadTranscriptRangeTool,
+    ReviewSandboxChangesTool,
     SearchTranscriptTool,
     Tool,
     ToolCatalog,
@@ -40,6 +42,7 @@ __version__ = "0.3.0"
 
 __all__ = [
     "AgentRuntime",
+    "ApplySandboxChangesTool",
     "BudgetExceededError",
     "CapabilityPolicy",
     "ChatProvider",
@@ -64,6 +67,7 @@ __all__ = [
     "PolicyPipeline",
     "ProviderRoute",
     "ReadTranscriptRangeTool",
+    "ReviewSandboxChangesTool",
     "RunMode",
     "SearchTranscriptTool",
     "SessionState",
