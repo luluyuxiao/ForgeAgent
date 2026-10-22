@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from .checkpoints import CheckpointManager
 from .config import CostBudget, Settings
 from .context import ContextWindow, ProviderSummarizer
+from .contracts import Message
 from .guidance import LoadSkillTool, SkillRegistry, load_repository_instructions
 from .hooks import ToolHooks
 from .mcp import McpConnectionSet, McpTool, load_mcp_tools
@@ -24,7 +25,14 @@ from .providers import (
 )
 from .runtime import AgentRuntime
 from .sandbox import DockerExecutor, LocalExecutor
-from .tools import ToolCatalog, ToolRegistry, build_builtin_tools, install_catalog_tools
+from .tools import (
+    ReadTranscriptRangeTool,
+    SearchTranscriptTool,
+    ToolCatalog,
+    ToolRegistry,
+    build_builtin_tools,
+    install_catalog_tools,
+)
 from .trace import JsonlTrace, NullTrace, TraceSink
 from .workers import (
     ChildRunResult,
@@ -78,6 +86,15 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
     registry = ToolRegistry(
         tool for tool in builtin_tools if _tool_allowed(tool.name, options.allowed_tools)
     )
+    runtime: AgentRuntime | None = None
+
+    def transcript_source() -> Sequence[Message]:
+        return runtime.transcript if runtime is not None else ()
+
+    if _tool_allowed("search_transcript", options.allowed_tools):
+        registry.register(SearchTranscriptTool(transcript_source))
+    if _tool_allowed("read_transcript_range", options.allowed_tools):
+        registry.register(ReadTranscriptRangeTool(transcript_source))
     if _tool_allowed("memory_update", options.allowed_tools):
         registry.register(MemoryUpdateTool(memory))
     if skills and _tool_allowed("load_skill", options.allowed_tools):
@@ -254,6 +271,7 @@ def _executor(settings: Settings):
         return DockerExecutor(
             settings.sandbox_image,
             network=settings.sandbox_network,
+            workspace_mode=settings.sandbox_workspace,
         )
     raise ValueError("FORGE_SANDBOX must be 'local' or 'docker'")
 

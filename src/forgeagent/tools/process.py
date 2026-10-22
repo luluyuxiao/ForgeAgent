@@ -14,7 +14,8 @@ from .filesystem import Workspace
 class RunChecksTool(Tool):
     name = "run_checks"
     description = (
-        "Run trusted lint/test commands declared in .forgeagent.json and return all exit codes."
+        "Run trusted lint/test commands declared in .forgeagent.json and return all exit "
+        "codes. Docker isolated mode discards command-generated workspace changes."
     )
     effect = ToolEffect.PROCESS
     capabilities = frozenset({"process", "filesystem_read", "filesystem_write", "network"})
@@ -66,6 +67,8 @@ class RunChecksTool(Tool):
                     "exit_code": completed.returncode,
                     "stdout": completed.stdout[-8000:],
                     "stderr": completed.stderr[-8000:],
+                    "workspace_mode": completed.workspace_mode,
+                    "workspace_changes": list(completed.workspace_changes),
                 }
             )
             if completed.returncode != 0:
@@ -81,7 +84,10 @@ class RunChecksTool(Tool):
 
 class ShellTool(Tool):
     name = "shell"
-    description = "Run a non-interactive shell command using the configured execution backend."
+    description = (
+        "Run a non-interactive shell command using the configured execution backend. "
+        "Docker isolated mode discards workspace changes; use file Tools for persistent edits."
+    )
     effect = ToolEffect.PROCESS
     capabilities = frozenset({"process", "filesystem_read", "filesystem_write", "network"})
     parameters: ClassVar[dict[str, Any]] = {
@@ -116,8 +122,20 @@ class ShellTool(Tool):
             return f"Error: {self.executor.name} executor failed: {type(error).__name__}: {error}"
         rendered = (
             f"exit_code={completed.returncode}\n"
+            f"workspace_mode={completed.workspace_mode}\n"
             f"stdout:\n{completed.stdout or '[empty]'}\n"
-            f"stderr:\n{completed.stderr or '[empty]'}"
+            f"stderr:\n{completed.stderr or '[empty]'}\n"
+            "workspace_changes:\n"
+            + (
+                "\n".join(completed.workspace_changes)
+                if completed.workspace_changes
+                else "[none]"
+            )
+            + (
+                "\n[isolated workspace changes were discarded]"
+                if completed.workspace_mode == "isolated"
+                else ""
+            )
         )
         return bound_output(rendered)
 

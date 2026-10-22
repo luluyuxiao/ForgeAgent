@@ -7,15 +7,14 @@ import json
 import math
 import re
 import threading
-from collections import Counter
 from collections.abc import Iterable
 from typing import Any, ClassVar, Protocol
 
 from ..contracts import ToolCall
+from ..retrieval import bm25_scores
 from .base import Tool, ToolEffect
 
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
-_SEARCH_TOKEN = re.compile(r"[a-z0-9]+|[\u3400-\u4dbf\u4e00-\u9fff]", re.IGNORECASE)
 _RESULT_LIMIT = 32_000
 _PLANNING_EFFECTS = frozenset({ToolEffect.PURE, ToolEffect.READ})
 _NONINTERACTIVE_EFFECTS = frozenset(
@@ -156,7 +155,7 @@ class ToolCatalog:
             return []
 
         documents = {tool.name: _search_document(tool) for tool in tools}
-        lexical = _bm25_scores(query, documents)
+        lexical = bm25_scores(query, documents)
         semantic: dict[str, float] = {}
         semantic_status = "disabled"
         if self.embedder is not None:
@@ -320,47 +319,10 @@ def install_catalog_tools(catalog: ToolCatalog) -> None:
         catalog.activate([tool.name])
 
 
-def _tokenize(value: str) -> list[str]:
-    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value).replace("_", " ")
-    return [token.casefold() for token in _SEARCH_TOKEN.findall(expanded)]
-
-
 def _search_document(tool: Tool) -> str:
     name = tool.name.replace("__", " ").replace("_", " ")
     capabilities = " ".join(sorted(tool.capabilities))
     return f"{name} {name} {name} {tool.description} {capabilities} {tool.effect.value}"
-
-
-def _bm25_scores(query: str, documents: dict[str, str]) -> dict[str, float]:
-    query_tokens = _tokenize(query)
-    if not query_tokens or not documents:
-        return {}
-    tokenized = {name: _tokenize(text) for name, text in documents.items()}
-    average_length = sum(len(tokens) for tokens in tokenized.values()) / len(tokenized)
-    document_frequency = Counter(
-        token for tokens in tokenized.values() for token in set(tokens)
-    )
-    total = len(tokenized)
-    scores = {}
-    for name, tokens in tokenized.items():
-        frequencies = Counter(tokens)
-        score = 0.0
-        for token in query_tokens:
-            frequency = frequencies[token]
-            if frequency == 0:
-                continue
-            frequency_in_documents = document_frequency[token]
-            inverse_frequency = math.log(
-                1 + (total - frequency_in_documents + 0.5) / (frequency_in_documents + 0.5)
-            )
-            normalization = frequency + 1.5 * (
-                0.25 + 0.75 * len(tokens) / max(average_length, 1.0)
-            )
-            score += inverse_frequency * frequency * 2.5 / normalization
-        if score > 0:
-            scores[name] = score
-    return scores
-
 
 def _validated_vector(vector: list[float]) -> list[float]:
     values = [float(value) for value in vector]

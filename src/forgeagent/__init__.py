@@ -25,6 +25,8 @@ from .sandbox import DockerExecutor, LocalExecutor
 from .session import SessionState, SessionStore
 from .tools import (
     EmbeddingBackend,
+    ReadTranscriptRangeTool,
+    SearchTranscriptTool,
     Tool,
     ToolCatalog,
     ToolEffect,
@@ -61,7 +63,9 @@ __all__ = [
     "PlanningPolicy",
     "PolicyPipeline",
     "ProviderRoute",
+    "ReadTranscriptRangeTool",
     "RunMode",
+    "SearchTranscriptTool",
     "SessionState",
     "SessionStore",
     "Settings",

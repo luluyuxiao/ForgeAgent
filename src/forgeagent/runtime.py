@@ -315,6 +315,14 @@ class AgentRuntime:
         active_skills = self.skills.render_active()
         if active_skills:
             active_skills = "\n\n" + active_skills
+        transcript_rule = ""
+        stop_rule = "\n6. Stop when the task is complete."
+        if self.registry.get("search_transcript") is not None:
+            transcript_rule = (
+                "\n6. When an earlier conversation detail is missing from active context, "
+                "use search_transcript and then read_transcript_range instead of guessing."
+            )
+            stop_rule = "\n7. Stop when the task is complete."
         return (
             "You are ForgeAgent, a coding assistant operating in a local workspace.\n"
             f"Workspace: {self.workspace}\n\n"
@@ -325,7 +333,8 @@ class AgentRuntime:
             "3. Verify changes with relevant tests or commands.\n"
             "4. Treat Tool errors as observations and adapt.\n"
             "5. After modifying code, run the configured checks or relevant tests before finishing.\n"
-            "6. Stop when the task is complete."
+            + transcript_rule
+            + stop_rule
             + instructions
             + task_memory
             + skill_catalog

@@ -52,6 +52,8 @@ def test_subagent_profiles_only_narrow_parent_tools():
 
     assert research is not None
     assert "read_file" in research
+    assert "search_transcript" in research
+    assert "read_transcript_range" in research
     assert "write_file" not in research
     assert implement is not None
     assert "write_file" in implement

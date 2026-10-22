@@ -30,6 +30,8 @@ _RESEARCH_TOOLS = frozenset(
         "git_diff",
         "memory_update",
         "load_skill",
+        "search_transcript",
+        "read_transcript_range",
     }
 )
 _IMPLEMENT_TOOLS = _RESEARCH_TOOLS | frozenset(

@@ -81,6 +81,7 @@ class Settings:
     sandbox: str = "local"
     sandbox_image: str = "forgeagent-sandbox:latest"
     sandbox_network: str = "none"
+    sandbox_workspace: str = "isolated"
     mcp_config: Path | None = None
     trace_path: Path | None = None
     llm_summary: bool = True
@@ -111,6 +112,7 @@ class Settings:
             sandbox=os.getenv("FORGE_SANDBOX", "local"),
             sandbox_image=os.getenv("FORGE_SANDBOX_IMAGE", "forgeagent-sandbox:latest"),
             sandbox_network=os.getenv("FORGE_SANDBOX_NETWORK", "none"),
+            sandbox_workspace=os.getenv("FORGE_SANDBOX_WORKSPACE", "isolated"),
             mcp_config=(
                 Path(os.environ["FORGE_MCP_CONFIG"]).expanduser()
                 if os.getenv("FORGE_MCP_CONFIG")

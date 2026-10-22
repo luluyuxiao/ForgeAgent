@@ -8,6 +8,7 @@ separate reasons to change:
 | `ChatProvider` | how one model request is transported |
 | `FallbackProvider` | which ordered route receives a request |
 | `ContextWindow` | what fits into the next model request |
+| Transcript retrieval Tools | which bounded earlier messages are recalled locally |
 | `TaskMemory` | which goal, constraints, plan and decisions survive compaction |
 | `SkillRegistry` | which workflow instructions are discovered and activated |
 | `CostBudget` | whether the next model request fits the configured spend ceiling |
@@ -32,15 +33,18 @@ src/forgeagent/
 ├── factory.py            # CLI/Eval composition root
 ├── config.py             # environment settings and cost budget
 ├── context.py            # context compaction and optional summarization
+├── retrieval.py          # shared local tokenization and BM25 ranking
 ├── guidance.py           # repository instructions and lazy Skills
 ├── policies.py           # capability, plan and permission admission
 ├── scheduler.py          # effect/resource-aware execution waves
+├── workspace_snapshot.py # disposable process workspaces and change manifests
 ├── session.py            # SQLite snapshots and legacy JSON loading
 ├── mcp.py                # MCP transports, clients and Tool proxies
 ├── workers.py            # foreground/background Sub-Agents
 ├── providers/            # model/embedding transports and fallback routing
 └── tools/
     ├── base.py           # Tool contract and resource claims
+    ├── conversation.py   # bounded Transcript search and range reads
     ├── registry.py       # registration and lazy schema catalog
     ├── filesystem.py     # workspace-confined file Tools
     ├── git.py            # status, diff and checked patch Tools
@@ -136,12 +140,23 @@ commands: it executes only lint/test commands declared by the repository in
 `.forgeagent.json`. The commands still require process permission and run
 through the selected local or Docker executor.
 
+Docker execution defaults to an isolated workspace snapshot. Git tracked and
+non-ignored files are copied to a temporary directory, a fresh repository
+baseline is created, and only that copy is bind-mounted read/write. A bounded
+status summary reports additions, modifications and deletions before the copy is
+discarded. `direct` mode deliberately restores the old writable bind mount for
+approved workflows that must persist process-generated files. This separates
+host containment from workspace integrity; it does not rely on a fragile shell
+command denylist. Local execution remains explicitly non-sandboxed.
+
 ## Context and persistence
 
 ```text
-append-only Transcript ───────────────────────────────► Session
+append-only Transcript ───────────────────────────────────► Session
+           │                                      ▲
+           ├── copy ─► Active Context ─► compact ─┤
            │
-           └── copy ─► Active Context ─► compact ─────► Session
+           └── local BM25 search ─► bounded range read ─► next model round
 ```
 
 Tool Call plus its Tool observations form an atomic block during collapse.
@@ -153,6 +168,14 @@ Session v3 stores transactional SQLite snapshots containing Transcript, Active
 Context, run mode, usage, active catalog names, structured task memory, active
 Skills and bounded file checkpoints. Legacy v1/v2 JSON documents remain
 readable. Sessions never store API keys or remembered permission grants.
+
+`search_transcript` and `read_transcript_range` expose the durable Transcript as
+a bounded read-only resource with the `conversation_read` capability. Search is
+local BM25; it does not use the optional Tool Catalog embedding backend. Results
+retain original message indexes, exclude the live user turn, and cap snippets,
+range size and per-message content so recalled history cannot replace normal
+context budgeting. The Tools resolve `runtime.transcript` dynamically, so a
+Session restore that replaces the in-memory list is immediately visible.
 
 ## MCP boundary
 

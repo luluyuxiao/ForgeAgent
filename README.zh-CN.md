@@ -14,6 +14,7 @@ ForgeAgent 是一个紧凑、由策略驱动的 Coding Agent / Agent Harness。�
 - Permission、Plan Mode 与按 Tool 能力划分的策略；
 - 感知副作用和资源的调度：独立读取可并发，写入操作串行执行；
 - 限制在工作区内的文件工具，以及本地或强化 Docker Shell 执行；
+- Docker 临时工作区快照、有界变更报告，以及需要显式开启的直接写入模式；
 - Git 状态、差异查看，以及带检查和文件检查点的多文件补丁应用；
 - 从 `AGENTS.md` 加载仓库指令，并支持发现目录级作用域指令；
 - 有大小限制的结构化任务记忆，保存目标、约束、计划、决策和修改文件；
@@ -25,6 +26,7 @@ ForgeAgent 是一个紧凑、由策略驱动的 Coding Agent / Agent Harness。�
 - 可选使用 Docker 隔离 stdio MCP Server；
 - 前台/后台 Sub-Agent，支持 `research`、`implement`、`full` 三种工具 Profile，以及共享目录或保留 Git Worktree 两种隔离方式；
 - 完整 Transcript 与精简 Active Context、Tool Result 裁剪、LLM 摘要、确定性折叠和硬预算限制；
+- 通过本地 `search_transcript` 与有界的 `read_transcript_range`，在上下文压缩后找回早期对话细节；
 - 事务化 SQLite Session，兼容读取旧版 JSON Session；
 - 基于显式输入/输出 Token 价格的运行时美元预算上限；
 - 为 `write_file`、`replace_text` 和补丁操作提供文件 Checkpoint/Undo；
@@ -62,7 +64,7 @@ CLI / library / Eval
                                       └── independent conversation + context
 ```
 
-`transcript` 是用于审计和回放的只追加历史记录；`active_messages` 是发送给模型、受预算限制的上下文视图。上下文压缩只会改变后者。
+`transcript` 是用于审计、回放和本地情景记忆检索的只追加历史记录；`active_messages` 是发送给模型、受预算限制的上下文视图。上下文压缩只会改变后者。
 
 ## 一次请求如何运行
 
@@ -268,7 +270,9 @@ docker build -f Dockerfile.sandbox -t forgeagent-sandbox:latest .
 forgeagent --sandbox docker --sandbox-image forgeagent-sandbox:latest
 ```
 
-该命令默认使用只读根文件系统、移除 Linux Capabilities、启用 `no-new-privileges`、限制 PID/CPU/内存、提供受限的 `/tmp`、使用非 root UID，并设置 `--network none`。所选工作区是唯一可写的挂载目录。Docker 执行失败时会采用 fail-closed 策略，绝不会退回宿主机 Shell。只有任务确实需要网络时才应使用 `--sandbox-network bridge`。
+该命令默认使用只读根文件系统、移除 Linux Capabilities、启用 `no-new-privileges`、限制 PID/CPU/内存、提供受限的 `/tmp`、使用非 root UID，并设置 `--network none`。同时默认启用 `--sandbox-workspace isolated`：ForgeAgent 把 Git 已跟踪及未忽略的项目文件复制到临时快照，只把快照以读写方式挂载给 Shell、检查命令和 Hook；命令结束后报告并丢弃快照中的新增、修改与删除，真实工作区不会挂载进该容器。只有明确批准的命令必须直接修改项目时，才应使用 `--sandbox-workspace direct`；普通源码修改应继续使用支持 Checkpoint 的文件 Tool。Docker 执行失败时采用 fail-closed，绝不会退回宿主机 Shell。只有任务确实需要网络时才应使用 `--sandbox-network bridge`。
+
+Local 模式只是执行后端，不是文件系统沙箱：把 `cwd` 设为工作区并不能阻止绝对路径或 `..` 访问。运行不可信命令时应选择 Docker isolated 模式。`.venv`、`node_modules` 等被忽略的依赖不会复制进临时快照；需要这些依赖时应预装在沙箱镜像中。
 
 ## MCP
 
@@ -317,6 +321,8 @@ HTTP 默认使用现代无状态 `2026-07-28` 生命周期；stdio 默认使用�
 
 最新的协议消息块会被保留。如果摘要失败，则退回确定性折叠。Session 会在事务化 SQLite 数据库中分别保存完整 Transcript 和已经压缩的 Active Context，同时保存结构化记忆、已激活 Skill、Catalog 状态和检查点。旧版 JSON Session 仍可读取，因此恢复速度快，同时不会破坏审计历史。
 
+压缩不会让旧信息彻底不可访问。当模型需要 Active Context 中已经不存在的细节时，`search_transcript` 会用本地 BM25 对早期消息排序，返回原始消息下标和有大小限制的片段；模型随后可用 `read_transcript_range` 读取小范围原文。两个 Tool 都会排除当前用户回合，单次原文读取最多八条消息，而且不会把对话内容发送给可选的 Tool Catalog Embedding 服务。恢复 Session 后仍可直接检索，因为完整 Transcript 已保存在快照中，不需要额外引入向量数据库。
+
 在执行可恢复的文件 Tool 前，`CheckpointManager` 会保存原始字节，或者记录文件此前不存在。成功调用会记录执行后的摘要，因此 `/undo` 不会覆盖用户后续修改；失败调用会自动回滚且不占用撤销历史。默认单文件快照上限为 10 MiB，总快照上限为 100 MiB。任意 Shell 命令和远程 MCP 调用的副作用无法被可靠推断，因此不会被标记为可撤销。
 
 ## Trace 与 Eval
@@ -355,7 +361,7 @@ Eval 默认不允许交互，并拒绝修改型 Tool。只有信任 Manifest 时
 
 - ForgeAgent 当前采用精确文件搜索、结构化记忆和可选 MCP 文档工具，没有内置向量数据库或通用 RAG 流水线；
 - MCP 客户端目前聚焦 Tool 发现和调用，尚不支持 Resources、Prompts、Elicitation、OAuth 与动态列表变更订阅；
-- Docker 隔离的是 Shell、项目检查、Hook 以及显式配置的 stdio MCP Server；文件和 Git Tool 仍在宿主进程中运行，但会执行工作区路径校验；
+- Docker 隔离的是 Shell、项目检查、Hook 以及显式配置的 stdio MCP Server；默认 isolated 快照会丢弃其中的工作区修改，direct 模式才会读写真实项目；文件和 Git Tool 仍在宿主进程中运行，但会执行工作区路径校验；
 - Checkpoint 只覆盖 ForgeAgent 能确定目标文件的可恢复修改。任意 Shell、HTTP/MCP、数据库或其他外部副作用不保证可撤销；
 - Session 会恢复对话、Active Context、记忆、已激活 Tool/Skill 和检查点，但不会恢复已经退出的 MCP 子进程、后台 Worker、临时权限授权或子 Agent 任务；
 - Worktree 子 Agent 不会复制父工作区的未提交修改，也不会自动合并或清理分支；共享工作区模式仍需要调用者避免并发修改同一文件；

@@ -20,6 +20,8 @@ not use non-public or leaked proprietary source code.
 - Permission, Plan Mode and per-Tool capability policies;
 - effect/resource-aware scheduling: independent reads overlap, writes serialize;
 - workspace-confined file tools plus local or hardened Docker shell execution;
+- disposable Docker workspace snapshots with bounded change reports and an explicit
+  direct-write escape hatch;
 - Git status/diff and checked multi-file patch application with file checkpoints;
 - repository instructions from `AGENTS.md` plus scoped-instruction discovery;
 - bounded structured memory for goals, constraints, plans, decisions and changed files;
@@ -33,6 +35,8 @@ not use non-public or leaked proprietary source code.
   Tool profiles plus shared or retained Git worktree isolation;
 - full Transcript plus compact Active Context, Tool Result snipping, LLM summary,
   deterministic collapse and hard budget enforcement;
+- local `search_transcript` and bounded `read_transcript_range` Tools for recovering
+  earlier details after context compaction;
 - transactional SQLite Session save/resume with legacy JSON compatibility;
 - configurable runtime USD ceilings based on explicit input/output token prices;
 - file Checkpoint/Undo for recoverable writes, replacements, and patch application;
@@ -70,9 +74,9 @@ CLI / library / Eval
                                       └── independent conversation + context
 ```
 
-`transcript` is the append-only history used for audit and replay.
-`active_messages` is the bounded view sent to the model. Context compaction
-changes only the latter.
+`transcript` is the append-only history used for audit, replay and local episodic
+retrieval. `active_messages` is the bounded view sent to the model. Context
+compaction changes only the latter.
 
 ## How a request runs
 
@@ -340,9 +344,21 @@ forgeagent --sandbox docker --sandbox-image forgeagent-sandbox:latest
 
 The command uses a read-only root filesystem, dropped Linux capabilities,
 `no-new-privileges`, PID/CPU/memory limits, a bounded `/tmp`, a non-root UID,
-and `--network none` by default. The selected workspace is the only writable
-bind mount. Docker failure is fail-closed: it never falls back to host shell.
-Use `--sandbox-network bridge` only when the task really needs network access.
+and `--network none` by default. It also defaults to
+`--sandbox-workspace isolated`: tracked and non-ignored project files are copied
+to a temporary snapshot, that snapshot is mounted read/write, and all Shell,
+check and Hook mutations are reported and discarded after the command. The real
+workspace is never mounted into that container. Use `--sandbox-workspace direct`
+only when an explicitly approved command must mutate the real workspace; normal
+source edits should use checkpoint-aware file Tools. Docker failure is
+fail-closed and never falls back to host shell. Use `--sandbox-network bridge`
+only when the task really needs network access.
+
+Local mode is an execution backend, not a filesystem sandbox: setting `cwd` to
+the workspace cannot prevent absolute paths or `..` traversal. Use Docker
+isolated mode for untrusted commands. Ignored dependencies such as `.venv` and
+`node_modules` are intentionally absent from isolated snapshots and should be
+provided by the sandbox image when checks need them.
 
 ## MCP
 
@@ -448,6 +464,15 @@ compacted Active Context separately in a transactional SQLite database,
 together with structured memory, active Skills, catalog state and checkpoints.
 Legacy JSON Sessions remain readable, so resume is fast without destroying
 audit history.
+
+Compaction does not make older details unreachable. When the model needs a fact
+that is absent from Active Context, `search_transcript` ranks earlier messages
+with local BM25 and returns their original indexes plus bounded snippets. It can
+then call `read_transcript_range` for a small exact neighborhood. The live user
+turn is excluded from both Tools, reads are limited to eight messages, and no
+conversation text is sent to the optional Tool Catalog embedding service. A
+resumed Session uses the same Tools because the complete Transcript is already
+part of the saved snapshot; no vector database is required.
 
 Before a recoverable file Tool executes, `CheckpointManager` stores original
 bytes (or records that the file did not exist). Successful calls record a

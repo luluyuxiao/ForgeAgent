@@ -4,6 +4,7 @@ import os
 
 from ..sandbox import CommandExecutor
 from .base import Access, ResourceClaim, Tool, ToolEffect
+from .conversation import ReadTranscriptRangeTool, SearchTranscriptTool
 from .filesystem import (
     FindFilesTool,
     NowTool,
@@ -40,7 +41,9 @@ def build_builtin_tools(
 __all__ = [
     "Access",
     "EmbeddingBackend",
+    "ReadTranscriptRangeTool",
     "ResourceClaim",
+    "SearchTranscriptTool",
     "Tool",
     "ToolCatalog",
     "ToolEffect",

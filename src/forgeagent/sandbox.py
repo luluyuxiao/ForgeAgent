@@ -8,12 +8,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .workspace_snapshot import temporary_workspace, workspace_changes, workspace_manifest
+
 
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+    workspace_mode: str = "direct"
+    workspace_changes: tuple[str, ...] = ()
 
 
 class CommandExecutor(Protocol):
@@ -58,16 +62,20 @@ class DockerExecutor:
         cpus: float = 1.0,
         pids_limit: int = 256,
         tmpfs_size: str = "64m",
+        workspace_mode: str = "isolated",
         runner=subprocess.run,
     ):
         if network not in {"none", "bridge"}:
             raise ValueError("Docker network must be 'none' or 'bridge'")
+        if workspace_mode not in {"isolated", "direct"}:
+            raise ValueError("Docker workspace mode must be 'isolated' or 'direct'")
         self.image = image
         self.network = network
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
         self.tmpfs_size = tmpfs_size
+        self.workspace_mode = workspace_mode
         self._runner = runner
 
     def command(self, shell_command: str, workspace: Path) -> list[str]:
@@ -108,9 +116,40 @@ class DockerExecutor:
     def execute(
         self, command: str, cwd: Path, timeout: int, *, stdin: str | None = None
     ) -> CommandResult:
+        if self.workspace_mode == "direct":
+            before = workspace_manifest(cwd)
+            completed = self._run(command, cwd, timeout, stdin)
+            return CommandResult(
+                completed.returncode,
+                completed.stdout,
+                completed.stderr,
+                workspace_mode="direct",
+                workspace_changes=workspace_changes(before, workspace_manifest(cwd)),
+            )
         try:
-            completed = self._runner(
-                self.command(command, cwd),
+            with temporary_workspace(cwd) as (workspace, before):
+                completed = self._run(command, workspace, timeout, stdin)
+                changes = workspace_changes(before, workspace_manifest(workspace))
+                return CommandResult(
+                    completed.returncode,
+                    completed.stdout,
+                    completed.stderr,
+                    workspace_mode="isolated",
+                    workspace_changes=changes,
+                )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"cannot prepare isolated workspace: {error}") from error
+
+    def _run(
+        self,
+        command: str,
+        workspace: Path,
+        timeout: int,
+        stdin: str | None,
+    ):
+        try:
+            return self._runner(
+                self.command(command, workspace),
                 text=True,
                 capture_output=True,
                 input=stdin,
@@ -121,4 +160,3 @@ class DockerExecutor:
             raise TimeoutError(f"command timed out after {timeout} seconds") from error
         except FileNotFoundError as error:
             raise RuntimeError("Docker executable was not found; local fallback is disabled") from error
-        return CommandResult(completed.returncode, completed.stdout, completed.stderr)

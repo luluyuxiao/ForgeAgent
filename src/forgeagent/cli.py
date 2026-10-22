@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sandbox", choices=["local", "docker"])
     parser.add_argument("--sandbox-image")
     parser.add_argument("--sandbox-network", choices=["none", "bridge"])
+    parser.add_argument("--sandbox-workspace", choices=["isolated", "direct"])
     parser.add_argument("--mcp-config", help="JSON file describing MCP servers")
     parser.add_argument("--trace", help="append runtime events to this JSONL file")
     parser.add_argument("--hooks-config", help="JSON file describing pre/post Tool hooks")
@@ -122,6 +123,7 @@ def _settings_with_args(settings: Settings, args) -> Settings:
         sandbox=args.sandbox or settings.sandbox,
         sandbox_image=args.sandbox_image or settings.sandbox_image,
         sandbox_network=args.sandbox_network or settings.sandbox_network,
+        sandbox_workspace=args.sandbox_workspace or settings.sandbox_workspace,
         mcp_config=(Path(args.mcp_config).expanduser() if args.mcp_config else settings.mcp_config),
         trace_path=(Path(args.trace).expanduser() if args.trace else settings.trace_path),
         llm_summary=False if args.no_summary else settings.llm_summary,
