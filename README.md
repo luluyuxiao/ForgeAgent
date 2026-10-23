@@ -20,8 +20,8 @@ not use non-public or leaked proprietary source code.
 - Permission, Plan Mode and per-Tool capability policies;
 - effect/resource-aware scheduling: independent reads overlap, writes serialize;
 - workspace-confined file tools plus local or hardened Docker shell execution;
-- disposable Docker workspace snapshots with reviewable change sets, conflict-checked
-  policy-approved application, and an explicit direct-write escape hatch;
+- runtime-scoped Docker workspace sessions with cumulative reviewable change sets,
+  conflict-checked application, reset, and an explicit direct-write escape hatch;
 - Git status/diff and checked multi-file patch application with file checkpoints;
 - repository instructions from `AGENTS.md` plus scoped-instruction discovery;
 - bounded structured memory for goals, constraints, plans, decisions and changed files;
@@ -346,17 +346,23 @@ The command uses a read-only root filesystem, dropped Linux capabilities,
 `no-new-privileges`, PID/CPU/memory limits, a bounded `/tmp`, a non-root UID,
 and `--network none` by default. It also defaults to
 `--sandbox-workspace isolated`: tracked and non-ignored project files are copied
-to a temporary snapshot, and that snapshot alone is mounted read/write. The real
-workspace is never mounted into that container. After a successful command,
-ForgeAgent discards the snapshot but retains its Git patch as a bounded,
-process-local change set. The Agent can inspect it with
-`review_sandbox_changes`; persisting it requires a separate
-`apply_sandbox_changes` call, which passes normal write permission, verifies that
-creates a pending file checkpoint, verifies that every affected real file still
-matches the original snapshot, checks the patch, and only then applies it.
-Conflicts fail closed and
-`/undo` can restore a successfully applied change set. Pending change sets expire
-when the process exits and are not stored in Sessions. Use
+to a temporary workspace, and that workspace alone is mounted read/write. Each
+command still gets a fresh hardened container, but commands in the same Agent
+runtime reuse the temporary workspace. Source edits, workspace-local dependencies
+and test artifacts therefore remain available to later commands without another
+full copy. The real workspace is never mounted into those containers.
+
+Before each command, non-overlapping host edits are synchronized into the
+temporary workspace. If both sides changed the same file, execution stops with a
+session conflict instead of choosing a winner. The cumulative binary-capable Git
+patch keeps one stable change-set ID as commands continue, including after a
+non-zero command. The Agent can inspect it with `review_sandbox_changes`;
+persisting it requires `apply_sandbox_changes`, which passes normal write
+permission, creates a pending checkpoint, verifies every affected real file,
+runs `git apply --check`, and only then applies it. Success discards the temporary
+session and `/undo` can restore the applied files. `reset_sandbox_session`
+explicitly discards scratch state without applying it. Pending sessions and
+change sets expire when the process exits and are not stored in Sessions. Use
 `--sandbox-workspace direct` only when an explicitly approved command must mutate
 the real workspace immediately. Docker failure is
 fail-closed and never falls back to host shell. Use `--sandbox-network bridge`
@@ -365,8 +371,9 @@ only when the task really needs network access.
 Local mode is an execution backend, not a filesystem sandbox: setting `cwd` to
 the workspace cannot prevent absolute paths or `..` traversal. Use Docker
 isolated mode for untrusted commands. Ignored dependencies such as `.venv` and
-`node_modules` are intentionally absent from isolated snapshots and should be
-provided by the sandbox image when checks need them.
+`node_modules` are absent from the initial copy, but workspace-local installs can
+create and reuse them during the runtime. System-level dependencies should be
+provided by the sandbox image.
 
 ## MCP
 
@@ -513,15 +520,28 @@ Run the example Eval manifest against an isolated copy of a workspace:
 forgeagent-eval examples/eval.json --workspace . --output eval-report.json
 ```
 
+Run the bundled task benchmark three times per case to measure model variance:
+
+```bash
+forgeagent-eval examples/eval-benchmark.json \
+  --workspace examples/eval_workspace \
+  --yes --repeat 3 --output eval-report.json
+```
+
 Eval is non-interactive and fails closed for mutating Tools. Add `--yes` only
 for manifests you trust; changes still occur in a temporary workspace copy.
-Cases may assert required/forbidden Tools, output presence/absence, maximum
-Tool calls/tokens, file contents, duration and a post-run `test_command`. Eval
-reports aggregate tokens and duration alongside per-case verification output.
+Cases may declare categories, tags, exact or alternative expected Tools, allowed
+and forbidden Tools, output assertions, file contents, resource ceilings, and a
+post-run `test_command`. Reports include task success rate, per-category success,
+verification pass rate, test pass rate, Tool precision/recall, forbidden Tool
+executions, policy denials, repeat stability, tokens, duration, calls, and cost.
 Optional per-million input/output prices produce a reproducible estimated-cost
 field without embedding fast-changing provider prices in ForgeAgent.
 The post-run command uses the same local or Docker executor selected for the
 Agent; manifests are executable inputs and should still be reviewed before use.
+Metric definitions and interpretation guidance are in
+[`docs/EVALUATION.md`](docs/EVALUATION.md). The latest checked-in demonstration
+run is summarized in [`docs/BENCHMARK_RESULTS.md`](docs/BENCHMARK_RESULTS.md).
 
 ## Plan Mode and safety boundaries
 
@@ -546,6 +566,9 @@ file path or call arguments rather than granting an entire Tool class.
   configured stdio MCP servers. Isolated command changes persist only through a
   separate policy-approved, conflict-checked, checkpointed host-side Tool. Other
   file and Git Tools run in the host process with workspace path validation.
+- Isolated workspace sessions retain files, not container processes, shell state,
+  environment-variable mutations, or system package installs. They are runtime
+  state and are not restored by Session resume.
 - Checkpoints cover only recoverable mutations whose target files ForgeAgent
   can determine. Arbitrary shell, HTTP/MCP, database, and other external side
   effects are not guaranteed to be undoable.

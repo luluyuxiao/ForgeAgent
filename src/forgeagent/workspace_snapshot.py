@@ -68,21 +68,22 @@ class SandboxChangeStore:
         paths: tuple[str, ...],
         summary: tuple[str, ...],
         baseline: WorkspaceManifest,
+        change_set_id: str | None = None,
     ) -> SandboxChangeSet:
         if len(patch.encode("utf-8")) > self.max_patch_bytes:
             raise ValueError(f"sandbox patch exceeds {self.max_patch_bytes} bytes")
         if not patch.strip() or not paths:
             raise ValueError("sandbox execution produced no applicable patch")
-        change_set_id = uuid.uuid4().hex[:12]
+        identifier = change_set_id or uuid.uuid4().hex[:12]
         item = SandboxChangeSet(
-            change_set_id=change_set_id,
+            change_set_id=identifier,
             patch=patch,
             paths=paths,
             summary=summary,
             baseline={path: baseline.get(path, _MISSING_FINGERPRINT) for path in paths},
         )
         with self._lock:
-            self._items[change_set_id] = item
+            self._items[identifier] = item
             while len(self._items) > self.limit:
                 self._items.pop(next(iter(self._items)))
         return item
@@ -107,18 +108,71 @@ class SandboxChangeStore:
             self._items.pop(change_set_id, None)
 
 
+class IsolatedWorkspaceSession:
+    """One disposable workspace reused by commands in the same Agent runtime."""
+
+    def __init__(
+        self,
+        *,
+        source: Path,
+        workspace: Path,
+        baseline: WorkspaceManifest,
+        temporary: tempfile.TemporaryDirectory,
+    ):
+        self.session_id = uuid.uuid4().hex[:12]
+        self.source = source
+        self.workspace = workspace
+        self.baseline = baseline
+        self.temporary = temporary
+        self.change_set_id = ""
+        self.command_count = 0
+        self.lock = threading.RLock()
+
+    def close(self) -> None:
+        self.temporary.cleanup()
+
+
+def create_isolated_workspace(source: Path) -> IsolatedWorkspaceSession:
+    """Create a reusable disposable copy with a private Git baseline."""
+    resolved = source.expanduser().resolve()
+    temporary = tempfile.TemporaryDirectory(prefix="forgeagent-sandbox-")
+    workspace = Path(temporary.name) / "workspace"
+    try:
+        _copy_workspace(resolved, workspace)
+        baseline = workspace_manifest(workspace)
+    except Exception:
+        temporary.cleanup()
+        raise
+    return IsolatedWorkspaceSession(
+        source=resolved,
+        workspace=workspace,
+        baseline=baseline,
+        temporary=temporary,
+    )
+
+
 @contextmanager
 def temporary_workspace(source: Path) -> Iterator[tuple[Path, WorkspaceManifest]]:
     """Yield an initialized disposable copy and its baseline manifest."""
-    with tempfile.TemporaryDirectory(prefix="forgeagent-sandbox-") as temporary:
-        workspace = Path(temporary) / "workspace"
-        _copy_workspace(source, workspace)
-        yield workspace, workspace_manifest(workspace)
+    session = create_isolated_workspace(source)
+    try:
+        yield session.workspace, session.baseline
+    finally:
+        session.close()
 
 
 def workspace_manifest(root: Path) -> WorkspaceManifest:
     """Hash relevant files without following links or scanning dependency caches."""
     manifest: WorkspaceManifest = {}
+    git_files = _git_workspace_files(root)
+    if git_files is not None:
+        for relative_path in git_files:
+            if any(_ignore_snapshot_name(part) for part in relative_path.parts):
+                continue
+            fingerprint = fingerprint_path(root / relative_path)
+            if fingerprint[0] != "missing":
+                manifest[relative_path.as_posix()] = fingerprint
+        return manifest
     for directory, names, files in os.walk(root, followlinks=False):
         base = Path(directory)
         traversable = []
@@ -149,6 +203,8 @@ def fingerprint_path(path: Path) -> FileFingerprint:
         metadata = path.lstat()
     except FileNotFoundError:
         return _MISSING_FINGERPRINT
+    except OSError:
+        return ("other", 0, "", 0)
     mode = stat.S_IMODE(metadata.st_mode)
     if path.is_symlink():
         target = os.readlink(path)
@@ -163,6 +219,44 @@ def fingerprint_path(path: Path) -> FileFingerprint:
     except OSError:
         return ("other", 0, "", mode)
     return ("file", metadata.st_size, digest.hexdigest(), mode)
+
+
+def synchronize_isolated_workspace(
+    session: IsolatedWorkspaceSession,
+) -> tuple[str, ...]:
+    """Merge non-conflicting real-workspace edits into a retained sandbox."""
+    real_manifest = workspace_manifest(session.source)
+    scratch_manifest = workspace_manifest(session.workspace)
+    changed_on_host = tuple(
+        path
+        for path in sorted(session.baseline.keys() | real_manifest.keys())
+        if session.baseline.get(path, _MISSING_FINGERPRINT)
+        != real_manifest.get(path, _MISSING_FINGERPRINT)
+    )
+    conflicts = tuple(
+        path
+        for path in changed_on_host
+        if scratch_manifest.get(path, _MISSING_FINGERPRINT)
+        not in {
+            session.baseline.get(path, _MISSING_FINGERPRINT),
+            real_manifest.get(path, _MISSING_FINGERPRINT),
+        }
+    )
+    if conflicts or not changed_on_host:
+        return conflicts
+    unsupported = tuple(
+        path
+        for path in changed_on_host
+        if real_manifest.get(path, _MISSING_FINGERPRINT)[0]
+        not in {"file", "link", "missing"}
+    )
+    if unsupported:
+        return unsupported
+    for path in changed_on_host:
+        _sync_path(session.source / path, session.workspace / path)
+    _commit_snapshot_paths(session.workspace, changed_on_host)
+    session.baseline = real_manifest
+    return ()
 
 
 def workspace_changes(
@@ -290,17 +384,27 @@ def _copy_workspace(source: Path, target: Path) -> None:
 
 def _git_workspace_files(workspace: Path) -> tuple[Path, ...] | None:
     try:
-        root = subprocess.run(
-            ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-        if root.returncode != 0 or Path(root.stdout.strip()).resolve() != workspace:
-            return None
-        listed = subprocess.run(
-            [
+        snapshot_git = workspace.parent / ".forgeagent-snapshot.git"
+        if snapshot_git.is_dir():
+            command = _snapshot_git_command(
+                workspace,
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            )
+        else:
+            root = subprocess.run(
+                ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if root.returncode != 0 or Path(root.stdout.strip()).resolve() != workspace:
+                return None
+            command = [
                 "git",
                 "-C",
                 str(workspace),
@@ -309,7 +413,9 @@ def _git_workspace_files(workspace: Path) -> tuple[Path, ...] | None:
                 "--others",
                 "--exclude-standard",
                 "-z",
-            ],
+            ]
+        listed = subprocess.run(
+            command,
             capture_output=True,
             timeout=30,
             check=False,
@@ -359,6 +465,53 @@ def _initialize_snapshot_repository(workspace: Path) -> None:
                 return
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
         return
+
+
+def _commit_snapshot_paths(workspace: Path, paths: tuple[str, ...]) -> None:
+    commands = (
+        _snapshot_git_command(workspace, "reset", "-q", "HEAD", "--", "."),
+        _snapshot_git_command(workspace, "add", "-A", "--", *paths),
+        _snapshot_git_command(
+            workspace,
+            "-c",
+            "user.name=ForgeAgent Sandbox",
+            "-c",
+            "user.email=sandbox@localhost",
+            "commit",
+            "-qm",
+            "sync real workspace",
+        ),
+    )
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            cwd=workspace,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "cannot synchronize sandbox Git baseline: "
+                + (completed.stderr.strip() or completed.stdout.strip())
+            )
+
+
+def _sync_path(source: Path, target: Path) -> None:
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    elif target.is_dir():
+        shutil.rmtree(target)
+    if not source.exists() and not source.is_symlink():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_symlink():
+        target.symlink_to(os.readlink(source))
+    elif source.is_file():
+        shutil.copy2(source, target)
+    else:
+        raise ValueError(f"unsupported synchronized workspace path: {source}")
 
 
 def _snapshot_git_command(workspace: Path, *arguments: str) -> list[str]:

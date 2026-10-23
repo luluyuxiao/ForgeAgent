@@ -15,7 +15,7 @@ class RunChecksTool(Tool):
     name = "run_checks"
     description = (
         "Run trusted lint/test commands declared in .forgeagent.json and return all exit "
-        "codes. Successful Docker-isolated changes are retained as reviewable change sets."
+        "codes. Docker-isolated commands reuse the current runtime's temporary workspace."
     )
     effect = ToolEffect.PROCESS
     capabilities = frozenset({"process", "filesystem_read", "filesystem_write", "network"})
@@ -68,9 +68,12 @@ class RunChecksTool(Tool):
                     "stdout": completed.stdout[-8000:],
                     "stderr": completed.stderr[-8000:],
                     "workspace_mode": completed.workspace_mode,
+                    "sandbox_session_id": completed.sandbox_session_id or None,
+                    "command_changes": list(completed.command_changes),
                     "workspace_changes": list(completed.workspace_changes),
                     "change_set_id": completed.change_set_id or None,
                     "change_set_error": completed.change_set_error or None,
+                    "session_conflicts": list(completed.session_conflicts),
                 }
             )
             if completed.returncode != 0:
@@ -88,8 +91,9 @@ class ShellTool(Tool):
     name = "shell"
     description = (
         "Run a non-interactive shell command using the configured execution backend. "
-        "Successful Docker-isolated changes require review_sandbox_changes followed by "
-        "policy-approved apply_sandbox_changes before they persist."
+        "Docker-isolated calls reuse a runtime-scoped temporary workspace so later commands "
+        "see earlier files, but shell state and processes do not persist; review and explicitly "
+        "apply the cumulative change set to persist it."
     )
     effect = ToolEffect.PROCESS
     capabilities = frozenset({"process", "filesystem_read", "filesystem_write", "network"})
@@ -126,25 +130,38 @@ class ShellTool(Tool):
         rendered = (
             f"exit_code={completed.returncode}\n"
             f"workspace_mode={completed.workspace_mode}\n"
+            f"sandbox_session={completed.sandbox_session_id or '[none]'}\n"
             f"stdout:\n{completed.stdout or '[empty]'}\n"
             f"stderr:\n{completed.stderr or '[empty]'}\n"
-            "workspace_changes:\n"
+            "command_changes:\n"
+            + (
+                "\n".join(completed.command_changes)
+                if completed.command_changes
+                else "[none]"
+            )
+            + "\ncumulative_workspace_changes:\n"
             + (
                 "\n".join(completed.workspace_changes)
                 if completed.workspace_changes
                 else "[none]"
             )
             + (
+                "\nsession_conflicts:\n" + "\n".join(completed.session_conflicts)
+                if completed.session_conflicts
+                else ""
+            )
+            + (
                 f"\npending_change_set={completed.change_set_id}"
-                "\n[isolated workspace was discarded; review and explicitly apply this "
-                "change set to persist it]"
+                "\n[isolated workspace remains active for later commands; review and "
+                "explicitly apply this cumulative change set to persist it]"
                 if completed.change_set_id
                 else (
                     f"\nchange_set_error={completed.change_set_error}"
-                    "\n[isolated workspace changes were discarded and could not be retained]"
+                    "\n[isolated workspace remains active, but its changes cannot currently "
+                    "be applied; fix or reset the sandbox session]"
                     if completed.change_set_error
                     else (
-                        "\n[isolated workspace changes were discarded]"
+                        "\n[isolated workspace remains active; no applicable source changes]"
                         if completed.workspace_mode == "isolated"
                         else ""
                     )

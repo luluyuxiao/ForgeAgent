@@ -60,6 +60,7 @@ def test_subagent_profiles_only_narrow_parent_tools():
     assert "run_checks" in implement
     assert "review_sandbox_changes" in implement
     assert "apply_sandbox_changes" in implement
+    assert "reset_sandbox_session" in implement
     assert "shell" not in implement
     assert subagent_tool_allowlist("implement", parent) == frozenset(
         {"read_file", "write_file"}

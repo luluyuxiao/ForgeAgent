@@ -49,7 +49,7 @@ def test_isolated_workspace_discards_container_deletions(tmp_path):
     assert result.change_set_id
 
 
-def test_failed_isolated_command_does_not_retain_changes(tmp_path):
+def test_failed_isolated_command_retains_visible_scratch_changes(tmp_path):
     def runner(command, **kwargs):
         mount = command[command.index("--mount") + 1]
         mounted = Path(next(item[4:] for item in mount.split(",") if item.startswith("src=")))
@@ -59,8 +59,120 @@ def test_failed_isolated_command_does_not_retain_changes(tmp_path):
     result = DockerExecutor("sandbox:test", runner=runner).execute("mutate", tmp_path, 10)
 
     assert result.workspace_changes == ("A failed.txt",)
-    assert result.change_set_id == ""
+    assert result.command_changes == ("A failed.txt",)
+    assert result.change_set_id
     assert not (tmp_path / "failed.txt").exists()
+
+
+def test_isolated_commands_reuse_one_workspace_and_cumulative_change_set(tmp_path):
+    mounts = []
+
+    def runner(command, **kwargs):
+        mount = command[command.index("--mount") + 1]
+        mounted = Path(next(item[4:] for item in mount.split(",") if item.startswith("src=")))
+        mounts.append(mounted)
+        if command[-1] == "first":
+            (mounted / "first.txt").write_text("one", encoding="utf-8")
+            dependency = mounted / ".venv" / "marker"
+            dependency.parent.mkdir()
+            dependency.write_text("installed", encoding="utf-8")
+        else:
+            assert (mounted / "first.txt").read_text(encoding="utf-8") == "one"
+            assert (mounted / ".venv" / "marker").read_text(encoding="utf-8") == "installed"
+            (mounted / "second.txt").write_text("two", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0 if command[-1] == "first" else 1,
+            stdout="ok",
+            stderr="test failed" if command[-1] == "second" else "",
+        )
+
+    executor = DockerExecutor("sandbox:test", runner=runner)
+    first = executor.execute("first", tmp_path, 10)
+    second = executor.execute("second", tmp_path, 10)
+
+    assert mounts[0] == mounts[1]
+    assert second.returncode == 1
+    assert first.sandbox_session_id == second.sandbox_session_id
+    assert first.change_set_id == second.change_set_id
+    assert first.workspace_changes == ("A first.txt",)
+    assert second.command_changes == ("A second.txt",)
+    assert second.workspace_changes == ("A first.txt", "A second.txt")
+    assert not (tmp_path / "first.txt").exists()
+    assert not (tmp_path / "second.txt").exists()
+
+
+def test_discard_session_removes_scratch_workspace_and_starts_fresh(tmp_path):
+    mounts = []
+
+    def runner(command, **kwargs):
+        mount = command[command.index("--mount") + 1]
+        mounted = Path(next(item[4:] for item in mount.split(",") if item.startswith("src=")))
+        mounts.append(mounted)
+        if command[-1] == "write":
+            (mounted / "scratch.txt").write_text("temporary", encoding="utf-8")
+        else:
+            assert not (mounted / "scratch.txt").exists()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    executor = DockerExecutor("sandbox:test", runner=runner)
+    written = executor.execute("write", tmp_path, 10)
+    old_workspace = mounts[-1]
+    assert executor.discard_session(tmp_path)
+    assert not old_workspace.exists()
+
+    fresh = executor.execute("inspect", tmp_path, 10)
+
+    assert fresh.sandbox_session_id != written.sandbox_session_id
+    assert mounts[-1] != old_workspace
+    assert fresh.workspace_changes == ()
+
+
+def test_retained_session_imports_non_conflicting_real_workspace_edits(tmp_path):
+    observed = []
+
+    def runner(command, **kwargs):
+        mount = command[command.index("--mount") + 1]
+        mounted = Path(next(item[4:] for item in mount.split(",") if item.startswith("src=")))
+        observed.append(command[-1])
+        if command[-1] == "verify":
+            assert (mounted / "host-edit.txt").read_text(encoding="utf-8") == "new"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    executor = DockerExecutor("sandbox:test", runner=runner)
+    first = executor.execute("start", tmp_path, 10)
+    (tmp_path / "host-edit.txt").write_text("new", encoding="utf-8")
+
+    second = executor.execute("verify", tmp_path, 10)
+
+    assert observed == ["start", "verify"]
+    assert second.sandbox_session_id == first.sandbox_session_id
+    assert second.workspace_changes == ()
+
+
+def test_retained_session_blocks_overlapping_real_workspace_edits(tmp_path):
+    target = tmp_path / "shared.txt"
+    target.write_text("baseline", encoding="utf-8")
+    calls = 0
+
+    def runner(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        mount = command[command.index("--mount") + 1]
+        mounted = Path(next(item[4:] for item in mount.split(",") if item.startswith("src=")))
+        (mounted / "shared.txt").write_text("sandbox", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    executor = DockerExecutor("sandbox:test", runner=runner)
+    first = executor.execute("edit", tmp_path, 10)
+    target.write_text("user", encoding="utf-8")
+
+    blocked = executor.execute("test", tmp_path, 10)
+
+    assert calls == 1
+    assert blocked.returncode == 125
+    assert blocked.session_conflicts == ("shared.txt",)
+    assert blocked.change_set_id == first.change_set_id
+    assert target.read_text(encoding="utf-8") == "user"
 
 
 def test_isolated_change_set_excludes_generated_environment_secrets(tmp_path):

@@ -10,6 +10,7 @@ from forgeagent.policies import PermissionPolicy, PolicyContext
 from forgeagent.sandbox import DockerExecutor
 from forgeagent.tools import (
     ApplySandboxChangesTool,
+    ResetSandboxSessionTool,
     ReviewSandboxChangesTool,
     ToolEffect,
     Workspace,
@@ -37,7 +38,11 @@ def test_review_and_apply_isolated_changes_with_checkpoint_undo(tmp_path):
     executor, result = _isolated_changes(tmp_path)
     store = executor.change_store(tmp_path)
     review = ReviewSandboxChangesTool(store)
-    apply = ApplySandboxChangesTool(Workspace(tmp_path), store)
+    apply = ApplySandboxChangesTool(
+        Workspace(tmp_path),
+        store,
+        on_applied=lambda: executor.discard_session(tmp_path),
+    )
 
     reviewed = json.loads(review.execute(result.change_set_id))
     assert reviewed["summary"] == ["D delete.txt", "M modify.txt", "A new.txt"]
@@ -59,6 +64,7 @@ def test_review_and_apply_isolated_changes_with_checkpoint_undo(tmp_path):
     assert (tmp_path / "modify.txt").read_text(encoding="utf-8") == "after\n"
     assert not (tmp_path / "delete.txt").exists()
     assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "created\n"
+    assert not executor.discard_session(tmp_path)
     assert "Undid apply_sandbox_changes" in manager.undo()
     assert (tmp_path / "modify.txt").read_text(encoding="utf-8") == "before\n"
     assert (tmp_path / "delete.txt").read_text(encoding="utf-8") == "remove\n"
@@ -104,3 +110,16 @@ def test_unknown_change_set_is_a_bounded_tool_error(tmp_path):
     assert review.execute("missing").startswith("Error: unknown or expired")
     assert apply.checkpoint_paths({"change_set_id": "missing"}) == ()
     assert apply.execute("missing").startswith("Error: cannot validate")
+
+
+def test_reset_sandbox_session_discards_pending_state(tmp_path):
+    executor, result = _isolated_changes(tmp_path)
+    tool = ResetSandboxSessionTool(lambda: executor.discard_session(tmp_path))
+
+    reset = tool.execute()
+
+    assert reset.startswith("Discarded")
+    assert ReviewSandboxChangesTool(executor.change_store(tmp_path)).execute(
+        result.change_set_id
+    ).startswith("Error: unknown or expired")
+    assert tool.execute() == "No isolated sandbox session is active."

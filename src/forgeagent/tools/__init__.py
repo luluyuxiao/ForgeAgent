@@ -17,7 +17,11 @@ from .filesystem import (
 from .git import ApplyPatchTool, GitDiffTool, GitStatusTool
 from .process import RunChecksTool, ShellTool
 from .registry import EmbeddingBackend, ToolCatalog, ToolRegistry, install_catalog_tools
-from .sandbox_changes import ApplySandboxChangesTool, ReviewSandboxChangesTool
+from .sandbox_changes import (
+    ApplySandboxChangesTool,
+    ResetSandboxSessionTool,
+    ReviewSandboxChangesTool,
+)
 
 
 def build_builtin_tools(
@@ -44,6 +48,7 @@ __all__ = [
     "ApplySandboxChangesTool",
     "EmbeddingBackend",
     "ReadTranscriptRangeTool",
+    "ResetSandboxSessionTool",
     "ResourceClaim",
     "ReviewSandboxChangesTool",
     "SearchTranscriptTool",

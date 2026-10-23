@@ -1,0 +1,84 @@
+{
+  "cases": [
+    {
+      "name": "locate-default-currency",
+      "category": "code-understanding",
+      "tags": ["python", "read-only"],
+      "prompt": "Inspect the project and report the exact DEFAULT_CURRENCY value. Do not modify files.",
+      "output_contains": ["CNY"],
+      "output_not_contains": ["Traceback"],
+      "expected_tool_groups": [["read_file", "search_text"]],
+      "allowed_tools": ["find_files", "read_file", "search_text"],
+      "forbidden_tools": ["write_file", "replace_text", "apply_patch", "shell"],
+      "max_seconds": 60,
+      "max_total_tokens": 12000,
+      "max_tool_calls": 6
+    },
+    {
+      "name": "fix-clamp-boundaries",
+      "category": "bug-fix",
+      "tags": ["python", "unit-test"],
+      "prompt": "Fix clamp in src/calculator.py so values below, inside, and above the interval are handled correctly. Preserve the invalid-range validation and run the focused test.",
+      "output_not_contains": ["Traceback"],
+      "expected_tool_groups": [
+        ["read_file", "search_text"],
+        ["replace_text", "apply_patch", "write_file"],
+        ["run_checks", "shell"]
+      ],
+      "allowed_tools": [
+        "find_files", "read_file", "search_text", "replace_text", "apply_patch",
+        "write_file", "run_checks", "shell", "git_diff", "git_status", "memory_update"
+      ],
+      "forbidden_tools": ["subagent"],
+      "max_seconds": 120,
+      "max_total_tokens": 40000,
+      "max_tool_calls": 14,
+      "test_command": "python -m unittest discover -s tests -p 'test_calculator_clamp.py' -q",
+      "test_timeout": 30
+    },
+    {
+      "name": "fix-total-price",
+      "category": "bug-fix",
+      "tags": ["python", "unit-test"],
+      "prompt": "Fix total_price in src/calculator.py. It must multiply unit price by quantity and round the final total to two decimal places. Run the focused test.",
+      "output_not_contains": ["Traceback"],
+      "expected_tool_groups": [
+        ["read_file", "search_text"],
+        ["replace_text", "apply_patch", "write_file"],
+        ["run_checks", "shell"]
+      ],
+      "allowed_tools": [
+        "find_files", "read_file", "search_text", "replace_text", "apply_patch",
+        "write_file", "run_checks", "shell", "git_diff", "git_status", "memory_update"
+      ],
+      "forbidden_tools": ["subagent"],
+      "max_seconds": 120,
+      "max_total_tokens": 40000,
+      "max_tool_calls": 14,
+      "test_command": "python -m unittest discover -s tests -p 'test_calculator_total.py' -q",
+      "test_timeout": 30
+    },
+    {
+      "name": "implement-slugify",
+      "category": "feature",
+      "tags": ["python", "unit-test"],
+      "prompt": "Implement slugify in src/text_utils.py using only the Python standard library. The result must be lowercase, replace runs of non-alphanumeric characters with one hyphen, and have no leading or trailing hyphen. Run the focused test.",
+      "output_not_contains": ["Traceback"],
+      "expected_tool_groups": [
+        ["read_file", "search_text"],
+        ["replace_text", "apply_patch", "write_file"],
+        ["run_checks", "shell"]
+      ],
+      "allowed_tools": [
+        "find_files", "read_file", "search_text", "replace_text", "apply_patch",
+        "write_file", "run_checks", "shell", "git_diff", "git_status", "memory_update"
+      ],
+      "forbidden_tools": ["subagent"],
+      "max_seconds": 120,
+      "max_total_tokens": 40000,
+      "max_tool_calls": 14,
+      "test_command": "python -m unittest discover -s tests -p 'test_text_utils.py' -q",
+      "test_timeout": 30
+    }
+  ]
+}

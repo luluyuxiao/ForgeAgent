@@ -42,6 +42,7 @@ _IMPLEMENT_TOOLS = _RESEARCH_TOOLS | frozenset(
         "run_checks",
         "review_sandbox_changes",
         "apply_sandbox_changes",
+        "reset_sandbox_session",
     }
 )
 

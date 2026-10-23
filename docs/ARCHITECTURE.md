@@ -142,13 +142,18 @@ through the selected local or Docker executor.
 
 Docker execution defaults to an isolated workspace snapshot. Git tracked and
 non-ignored files are copied to a temporary directory, a fresh repository
-baseline is created, and only that copy is bind-mounted read/write. A successful
-command can retain a bounded binary-capable Git patch in a process-local change
-store before the copy is discarded. `review_sandbox_changes` exposes the patch
-without mutation. `apply_sandbox_changes` is a separate `WRITE` Tool, so policy
-approval happens before execution; it then compares affected real files with
-their snapshot fingerprints, runs `git apply --check`, and relies on the normal
-checkpoint lifecycle for rollback and Undo. A conflict rejects the whole patch.
+baseline is created, and only that copy is bind-mounted read/write. The
+workspace is retained for the lifetime of one Agent runtime while every command
+still runs in a fresh container. Before a command, a three-way comparison between
+the baseline, real workspace and scratch workspace imports disjoint host edits
+and rejects overlapping edits. After a command, one stable process-local change
+set is replaced with the new cumulative binary-capable patch, regardless of the
+command's exit code. `review_sandbox_changes` exposes the patch without mutation.
+`apply_sandbox_changes` is a separate `WRITE` Tool, so policy approval happens
+before execution; it then compares affected real files with their snapshot
+fingerprints, runs `git apply --check`, and relies on the normal checkpoint
+lifecycle for rollback and Undo. Success closes the scratch session; an explicit
+`reset_sandbox_session` discards it. A conflict rejects the whole patch.
 `direct` mode deliberately restores the old writable bind mount for approved
 workflows that must persist process-generated files immediately. This separates
 host containment from workspace integrity; it does not rely on a fragile shell

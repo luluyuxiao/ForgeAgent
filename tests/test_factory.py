@@ -25,10 +25,13 @@ def test_factory_composes_docker_catalog_checkpoint_and_trace(tmp_path):
         settings,
         RuntimeOptions(workspace=tmp_path, enable_subagents=False),
     )
+    scratch = None
     try:
         shell = bundle.runtime.registry.require("shell")
         assert isinstance(shell.executor, DockerExecutor)
         assert shell.executor.workspace_mode == "isolated"
+        scratch = shell.executor.isolated_session(tmp_path).workspace
+        assert scratch.is_dir()
         assert bundle.runtime.catalog is not None
         assert bundle.runtime.checkpoints is not None
         assert bundle.runtime.registry.get("memory_update") is not None
@@ -36,10 +39,12 @@ def test_factory_composes_docker_catalog_checkpoint_and_trace(tmp_path):
         assert bundle.runtime.registry.get("read_transcript_range") is not None
         assert bundle.runtime.registry.get("review_sandbox_changes") is not None
         assert bundle.runtime.registry.get("apply_sandbox_changes") is not None
+        assert bundle.runtime.registry.get("reset_sandbox_session") is not None
         assert bundle.runtime.hooks is not None
         assert bundle.runtime.budget.max_usd == 0
     finally:
         bundle.close()
+    assert scratch is not None and not scratch.exists()
 
 
 def test_transcript_search_reads_the_restored_runtime_history(tmp_path):
@@ -145,6 +150,7 @@ def test_factory_filters_child_runtime_tools_by_profile(tmp_path):
         assert implement.runtime.registry.get("run_checks") is not None
         assert implement.runtime.registry.get("review_sandbox_changes") is None
         assert implement.runtime.registry.get("apply_sandbox_changes") is None
+        assert implement.runtime.registry.get("reset_sandbox_session") is None
         assert implement.runtime.registry.get("shell") is None
         assert implement.runtime.registry.get("subagent") is None
     finally:

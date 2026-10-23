@@ -24,10 +24,11 @@ from .providers import (
     OpenAICompatibleProvider,
 )
 from .runtime import AgentRuntime
-from .sandbox import DockerExecutor, LocalExecutor
+from .sandbox import CommandExecutor, DockerExecutor, LocalExecutor
 from .tools import (
     ApplySandboxChangesTool,
     ReadTranscriptRangeTool,
+    ResetSandboxSessionTool,
     ReviewSandboxChangesTool,
     SearchTranscriptTool,
     ToolCatalog,
@@ -64,12 +65,16 @@ class RuntimeBundle:
     runtime: AgentRuntime
     mcp: McpConnectionSet | None = None
     workers: SubAgentManager | None = None
+    executor: CommandExecutor | None = None
 
     def close(self) -> None:
         if self.workers is not None:
             self.workers.close()
         if self.mcp is not None:
             self.mcp.close()
+        close_executor = getattr(self.executor, "close", None)
+        if close_executor is not None:
+            close_executor()
 
 
 # 传入参数
@@ -104,6 +109,13 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
         registry.register(LoadSkillTool(skills))
     if isinstance(executor, DockerExecutor) and executor.workspace_mode == "isolated":
         change_store = executor.change_store(workspace)
+
+        def discard_sandbox_session() -> bool:
+            return executor.discard_session(workspace)
+
+        def close_applied_sandbox_session() -> None:
+            executor.discard_session(workspace)
+
         if _tool_allowed("review_sandbox_changes", options.allowed_tools):
             registry.register(ReviewSandboxChangesTool(change_store))
         if _tool_allowed("apply_sandbox_changes", options.allowed_tools):
@@ -111,8 +123,11 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
                 ApplySandboxChangesTool(
                     Workspace(workspace),
                     change_store,
+                    on_applied=close_applied_sandbox_session,
                 )
             )
+        if _tool_allowed("reset_sandbox_session", options.allowed_tools):
+            registry.register(ResetSandboxSessionTool(discard_sandbox_session))
     core_names = set(registry.names())
     capability = CapabilityPolicy(options.allowed_capabilities)
     mcp_connections = None
@@ -248,7 +263,7 @@ def create_runtime(settings: Settings, options: RuntimeOptions) -> RuntimeBundle
         ),
         refresh_mcp=refresh_mcp if mcp_connections is not None else None,
     )
-    return RuntimeBundle(runtime, mcp_connections, workers)
+    return RuntimeBundle(runtime, mcp_connections, workers, executor)
 
 
 def create_provider(settings: Settings):
